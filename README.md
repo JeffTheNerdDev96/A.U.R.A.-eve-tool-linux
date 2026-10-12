@@ -1,9 +1,9 @@
 # A.U.R.A.-eve-tool-linux
-Your all one in all Eve Online tool - Linux Editon
+Your all-in-one EVE Online tactical tool — Linux Edition
 
 # Adaptive Underworld Recon Array (A.U.R.A.) — Native Linux & Ubuntu Quickstart
 
-**Product Version:** `v0.4.2-alpha.1`  
+**Product Version:** `v0.6.0-alpha.4`  
 **License:** GNU Affero General Public License Version 3 (AGPL-3.0)  
 **Author & Maintainer:** JeffTheNerdDev96  
 
@@ -88,7 +88,29 @@ A.U.R.A. automatically discovers EVE Online chatlogs across all popular Linux ga
 
 ---
 
-## 6. License & Copyleft
+## 6. Packaging & Releases
+
+Prebuilt native packages target the two most common Linux families:
+
+- **Ubuntu / Debian:** `./packaging/ubuntu/build_deb.sh` → `dist/aura-eve-tool_*.deb`
+- **Fedora / RHEL:** `./packaging/fedora/build_rpm.sh` → `dist/aura-eve-tool-*.rpm`
+
+Both install the application to `/opt/aura` with a `/usr/bin/aura` launcher.
+See [`packaging/README.md`](packaging/README.md). GitHub Actions builds both
+artifacts on every `v*` tag.
+
+---
+
+## 7. Verification
+
+```bash
+cd "A.U.R.A. Linux"
+python tools/run_all_tests.py
+```
+
+---
+
+## 8. License & Copyleft
 
 Protected under the **GNU Affero General Public License Version 3 (AGPL-3.0)**.  
-See `LICENSE.txt` in the repository root.
+See [`LICENSE`](LICENSE) in the repository root.

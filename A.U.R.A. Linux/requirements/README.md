@@ -51,3 +51,12 @@ Install:
 ```bash
 pip install -r requirements/requirements.txt
 ```
+
+### D. VOIP (Mumble) Alliance Voice
+Adds the Mumble protocol client and Opus codec bindings. Requires the system
+Opus library (`libopus0` on Debian/Ubuntu, `opus` on Fedora/Arch).
+
+Install:
+```bash
+pip install -r requirements/requirements-voip.txt
+```

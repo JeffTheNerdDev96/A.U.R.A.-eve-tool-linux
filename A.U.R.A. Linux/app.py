@@ -18,7 +18,7 @@
 # ==============================================================================
 """
 Main entry point for Adaptive Underworld Recon Array (A.U.R.A.).
-Angel Cartel EVE Online Tactical AI Assistant - v0.4.2-alpha.1.
+Angel Cartel EVE Online Tactical AI Assistant - v0.6.0-alpha.4.
 """
 import sys
 import os
@@ -37,6 +37,24 @@ if sys.stdout and hasattr(sys.stdout, "reconfigure"):
 if sys.stderr and hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
+
+def _log_dir_path() -> str:
+    """
+    Resolve the crash-log directory, preferring the XDG-aware core resolver.
+    Falls back to the application 'logs' directory when core is not importable.
+    """
+    try:
+        from core.paths import get_logs_dir
+        return get_logs_dir()
+    except Exception:
+        fallback = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+        try:
+            os.makedirs(fallback, exist_ok=True)
+        except OSError:
+            pass
+        return fallback
+
+
 # 0. Strict Python 3.12+ Architecture Requirement
 if sys.version_info < (3, 12):
     _display_title = "A.U.R.A. Assist"
@@ -46,7 +64,7 @@ if sys.version_info < (3, 12):
         f"Legacy versions (< 3.12) are not supported. Please run the {INSTALLER_EXE_NAME} installer."
     )
     try:
-        _log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+        _log_dir = _log_dir_path()
         os.makedirs(_log_dir, exist_ok=True)
         with open(os.path.join(_log_dir, "crash.log"), "a", encoding="utf-8") as _f:
             _f.write(
@@ -93,7 +111,7 @@ def _global_exception_handler(exc_type, exc_value, exc_traceback):
         sys.__excepthook__(exc_type, exc_value, exc_traceback)
         return
 
-    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    log_dir = _log_dir_path()
     os.makedirs(log_dir, exist_ok=True)
     crash_log = os.path.join(log_dir, "crash.log")
 
@@ -113,7 +131,7 @@ sys.excepthook = _global_exception_handler
 
 
 def _show_startup_error(exc: BaseException) -> None:
-    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    log_dir = _log_dir_path()
     crash_log = os.path.join(log_dir, "crash.log")
     err_msg = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     try:

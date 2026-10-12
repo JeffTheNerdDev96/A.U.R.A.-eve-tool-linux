@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# ==============================================================================
+# Adaptive Underworld Recon Array (A.U.R.A.) - Linux launcher shim
+# Copyright (C) 2026 JeffTheNerdDev96
+# GNU Affero General Public License v3.0 (AGPL-3.0)
+# ==============================================================================
+# Installed to /usr/bin/aura by both the .deb and .rpm pipelines.
+# Launches the source tree at /opt/aura with Wayland/XCB fallback and prefers
+# an optional user-provisioned /opt/aura/.venv (llama-cpp-python, VOIP deps).
+# ==============================================================================
+set -euo pipefail
+
+APP_ROOT="${AURA_APP_ROOT:-/opt/aura}"
+
+export PYTHONUTF8=1
+export PYTHONIOENCODING=utf-8
+# Legacy protobuf stubs (pymumble) require the pure-Python backend.
+export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION="${PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION:-python}"
+
+# Display server selection: native Wayland with automatic XCB fallback.
+if [ -n "${WAYLAND_DISPLAY:-}" ] || [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
+    export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland;xcb}"
+else
+    export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
+fi
+
+# Interpreter: prefer the optional venv, else the system Python 3.
+if [ -x "${APP_ROOT}/.venv/bin/python" ]; then
+    PY="${APP_ROOT}/.venv/bin/python"
+else
+    PY="$(command -v python3)"
+fi
+
+# Register the llama.cpp native library directory when present.
+for CAND in "${APP_ROOT}/.venv/lib" "${APP_ROOT}/requirements/venv/lib"; do
+    if [ -d "${CAND}" ]; then
+        FOUND_LIB="$(find "${CAND}" -type d -path '*llama_cpp*' -name lib -print -quit 2>/dev/null || true)"
+        if [ -n "${FOUND_LIB}" ]; then
+            export LD_LIBRARY_PATH="${FOUND_LIB}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+        fi
+    fi
+done
+
+cd "${APP_ROOT}"
+exec "${PY}" "${APP_ROOT}/app.py" "$@"

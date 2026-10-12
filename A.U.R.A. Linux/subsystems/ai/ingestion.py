@@ -75,22 +75,14 @@ class ImagePreprocessor:
                         clean = line.strip()
                         if clean and clean not in extracted_lines:
                             extracted_lines.append(clean)
-            except Exception:
-                try:
-                    import winocr
-                    res = winocr.recognize_pil_sync(enhanced_img, 'en')
-                    if res and "lines" in res:
-                        for line_dict in res["lines"]:
-                            txt = line_dict.get("text", "").strip()
-                            if txt and txt not in extracted_lines:
-                                extracted_lines.append(txt)
-                    elif res and "text" in res:
-                        for line in res["text"].split("\n"):
-                            clean = line.strip()
-                            if clean and clean not in extracted_lines:
-                                extracted_lines.append(clean)
-                except Exception:
-                    pass
+            except Exception as ocr_exc:
+                # Tesseract OCR is the sole vision backend on Linux; record a soft
+                # diagnostic instead of aborting screenshot ingestion.
+                log_diagnostic_error(
+                    AURAErrorCode.ERR_3004_INGESTION_FAILED,
+                    ocr_exc,
+                    "ImagePreprocessor.analyze_image_content (tesseract)",
+                )
 
             extracted_text = _finalize_text(
                 "\n".join(extracted_lines) if extracted_lines

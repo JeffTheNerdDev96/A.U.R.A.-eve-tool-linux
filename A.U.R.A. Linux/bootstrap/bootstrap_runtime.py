@@ -109,3 +109,53 @@ def configure_qt_plugin_paths() -> Optional[str]:
 def bootstrap_qt_runtime() -> None:
     """Canonical entrypoint to bootstrap Qt6 environment before importing PyQt6."""
     configure_qt_plugin_paths()
+
+
+def _frozen_bundle_root() -> Optional[str]:
+    """Returns the PyInstaller bundle root (_MEIPASS) or executable directory, if frozen."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass and os.path.isdir(meipass):
+        return os.path.abspath(meipass)
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return None
+
+
+def configure_frozen_qt_paths() -> Optional[str]:
+    """
+    Configures Qt6 plugin and platform paths inside a PyInstaller-frozen Linux bundle.
+    Returns the resolved plugin directory, or None when no bundle plugin dir is present.
+    """
+    bundle = _frozen_bundle_root()
+    if not bundle:
+        return None
+
+    for plugin_dir in (
+        os.path.join(bundle, "PyQt6", "Qt6", "plugins"),
+        os.path.join(bundle, "qt6", "plugins"),
+        os.path.join(bundle, "plugins"),
+    ):
+        if not os.path.isdir(plugin_dir):
+            continue
+        existing = os.environ.get("QT_PLUGIN_PATH", "")
+        if plugin_dir not in existing.split(os.pathsep):
+            os.environ["QT_PLUGIN_PATH"] = (
+                f"{plugin_dir}{os.pathsep}{existing}" if existing else plugin_dir
+            )
+        platforms_dir = os.path.join(plugin_dir, "platforms")
+        if os.path.isdir(platforms_dir):
+            os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", platforms_dir)
+        return plugin_dir
+    return None
+
+
+def configure_qt_paths() -> None:
+    """
+    Canonical cross-module entrypoint used by app.py.
+    Applies Linux display-server selection, plugin discovery, and frozen bundle paths.
+    """
+    configure_linux_display_server()
+    if getattr(sys, "frozen", False):
+        configure_frozen_qt_paths()
+    else:
+        configure_qt_plugin_paths()

@@ -1,0 +1,35 @@
+#!/usr/bin/make -f
+# ==============================================================================
+# Adaptive Underworld Recon Array (A.U.R.A.) - Debian build rules
+# GNU Affero General Public License v3.0 (AGPL-3.0)
+# ==============================================================================
+# .RECIPEPREFIX avoids literal-tab fragility in this template.
+.RECIPEPREFIX = >
+export DH_VERBOSE = 1
+
+%:
+> dh $@
+
+override_dh_auto_clean:
+> rm -rf debian/aura-eve-tool
+> dh_auto_clean || true
+
+override_dh_auto_build:
+> true
+
+override_dh_auto_test:
+> true
+
+override_dh_auto_install:
+> install -d $(CURDIR)/debian/aura-eve-tool/opt/aura
+> cp -a aura/. $(CURDIR)/debian/aura-eve-tool/opt/aura/
+> install -d $(CURDIR)/debian/aura-eve-tool/usr/bin
+> install -m 0755 packaging/common/aura $(CURDIR)/debian/aura-eve-tool/usr/bin/aura
+> install -d $(CURDIR)/debian/aura-eve-tool/usr/share/applications
+> install -m 0644 packaging/common/aura.desktop $(CURDIR)/debian/aura-eve-tool/usr/share/applications/aura.desktop
+> install -d $(CURDIR)/debian/aura-eve-tool/usr/share/icons/hicolor/256x256/apps
+> install -m 0644 aura/assets/brand/app_icon.png $(CURDIR)/debian/aura-eve-tool/usr/share/icons/hicolor/256x256/apps/aura.png
+> install -d $(CURDIR)/debian/aura-eve-tool/usr/share/man/man1
+> install -m 0644 packaging/common/aura.1 $(CURDIR)/debian/aura-eve-tool/usr/share/man/man1/aura.1
+> install -d $(CURDIR)/debian/aura-eve-tool/usr/lib/aura
+> install -m 0755 packaging/common/aura-llm-setup.sh $(CURDIR)/debian/aura-eve-tool/usr/lib/aura/aura-llm-setup.sh

@@ -1,0 +1,19 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Adaptive Underworld Recon Array (A.U.R.A.)
+GenericName=EVE Online Tactical Companion
+Comment=Angel Cartel EVE Online Tactical AI Assistant & Intel Radar
+Exec=aura %u
+Icon=aura
+Terminal=false
+Categories=Game;Utility;
+Keywords=eve;online;intel;tactical;radar;dscan;fitting;mumble;xmpp;
+StartupNotify=true
+StartupWMClass=AURA
+Actions=DebugMode;
+
+[Desktop Action DebugMode]
+Name=Launch in Debug Terminal
+Exec=bash -c "aura; read -p 'Press enter to exit...'"
+Terminal=true

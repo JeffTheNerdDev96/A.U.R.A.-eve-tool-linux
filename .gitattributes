@@ -1,0 +1,21 @@
+# ==============================================================================
+# Adaptive Underworld Recon Array (A.U.R.A.) - line-ending normalization
+# GNU Affero General Public License v3.0 (AGPL-3.0)
+# ==============================================================================
+# Shell scripts and launchers MUST be LF-only so they remain executable on
+# Linux regardless of the development host's core.autocrlf setting.
+* text=auto
+*.sh            text eol=lf
+*.bash          text eol=lf
+*.py            text eol=lf
+*.spec          text eol=lf
+packaging/common/aura            text eol=lf
+packaging/common/aura.1          text eol=lf
+packaging/common/aura.desktop    text eol=lf
+*.desktop       text eol=lf
+
+# Binary assets must never be normalized.
+*.png           binary
+*.ico           binary
+*.ttf           binary
+*.zip           binary

@@ -1,0 +1,54 @@
+.TH AURA 1 "2026" "A.U.R.A. v0.6.0-alpha.4" "User Commands"
+.SH NAME
+aura \- Adaptive Underworld Recon Array (A.U.R.A.) EVE Online tactical AI assistant
+.SH SYNOPSIS
+.B aura
+.RI [ options ]
+.SH DESCRIPTION
+.B Adaptive Underworld Recon Array (A.U.R.A.)
+is an Angel Cartel themed EVE Online tactical companion featuring a local GGUF
+language model neural core, a Live Intel Radar, D\-Scan and fleet composition
+analysis, a fitting laboratory, wormhole mapping, and XMPP / Mumble VOIP
+integration.
+.PP
+The application source is installed under
+.I /opt/aura
+and per\-user runtime state (logs, model weights) is stored under
+.IR ~/.local/share/aura
+following the FreeDesktop XDG Base Directory specification.
+.SH ENVIRONMENT
+.TP
+.B AURA_APP_ROOT
+Override the installation directory (default
+.IR /opt/aura ).
+.TP
+.B AURA_DATA_DIR
+Override the per\-user data directory (default
+.IR ~/.local/share/aura ).
+.TP
+.B AURA_LOG_DIR
+Override the log directory.
+.TP
+.B AURA_MODEL_DIR
+Override the GGUF model weights directory.
+.TP
+.B QT_QPA_PLATFORM
+Qt platform plugin selection
+.IR ( wayland;xcb
+or
+.IR xcb ).
+.SH FILES
+.TP
+.I /opt/aura
+Application source tree.
+.TP
+.I ~/.local/share/aura/logs
+Runtime and crash logs.
+.TP
+.I ~/.local/share/aura/models
+Local GGUF neural weights.
+.SH LICENSE
+GNU Affero General Public License v3.0 (AGPL\-3.0).
+.SH SEE ALSO
+Full documentation in
+.I /usr/share/doc/aura-eve-tool/

@@ -35,7 +35,7 @@ from PyQt6.QtGui import QColor, QDesktopServices
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton,
     QFrame, QTextBrowser, QTreeWidget, QTreeWidgetItem, QSplitter,
-    QCheckBox, QSpinBox, QSizePolicy, QAbstractItemView,
+    QCheckBox, QSpinBox, QSizePolicy,
 )
 
 from subsystems.xmpp_chat import (
@@ -44,17 +44,25 @@ from subsystems.xmpp_chat import (
     XMPPConnectionState,
     XMPPMessage,
     XMPPMessageType,
-    XMPPBroadcastPing,
     XMPPBroadcastPriority,
     XMPPMUCChannel,
     XMPPRosterContact,
 )
-from core.input_safety import escape_html, safe_display_text
+from core.event_bus import get_event_bus
+from core.events import (
+    XMPPConnectionStateChangedEvent,
+    XMPPMessageReceivedEvent,
+    XMPPRoomJoinedEvent,
+    XMPPRosterUpdatedEvent,
+    XMPPChannelDiscoveredEvent,
+    XMPPDirectoryDiscoveredEvent,
+)
+from core.input_safety import escape_html
 from ui.theme import (
-    BG_DEEP, BG_PANEL, BG_ELEVATED, BORDER, BORDER_MUTED,
+    BG_PANEL, BG_ELEVATED, BORDER, BORDER_MUTED,
     TEXT_PRIMARY, TEXT_SECONDARY, TEXT_HINT, TEXT_BRAND,
-    ACCENT, ACCENT_HOVER, ACCENT_DIM, BTN_TEXT_ON_ACCENT,
-    STATUS_ONLINE, STATUS_STANDBY_BG,
+    ACCENT, ACCENT_DIM,
+    STATUS_STANDBY_BG,
     radar_accent_btn_css, radar_control_btn_css, btn_secondary_css,
 )
 
@@ -88,7 +96,7 @@ class XMPPTabWidget(QWidget):
 
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setStyleSheet(
-            f"XMPPTabWidget {{ background:{BG_DEEP}; }}"
+            f"XMPPTabWidget {{ background:transparent; }}"
             f"QLabel {{ color:{TEXT_SECONDARY}; }}"
         )
         self._init_ui()
@@ -116,10 +124,9 @@ class XMPPTabWidget(QWidget):
         top_row.addWidget(title_lbl)
 
         sec_notice = QLabel("🔒 <b>Ephemeral Session:</b> Credentials exist in volatile memory only and are never saved to disk.")
+        sec_notice.setWordWrap(True)
         sec_notice.setStyleSheet(f"color:{TEXT_BRAND}; font-size:11px;")
-        top_row.addWidget(sec_notice)
-
-        top_row.addStretch()
+        top_row.addWidget(sec_notice, stretch=1)
 
         self.status_badge = QLabel("⚪ Offline")
         self.status_badge.setStyleSheet(
@@ -129,71 +136,59 @@ class XMPPTabWidget(QWidget):
         top_row.addWidget(self.status_badge)
         auth_layout.addLayout(top_row)
 
-        # Input Row (JID, Password, Host Override, Port, Controls)
-        input_row = QHBoxLayout()
-        input_row.setSpacing(6)
-
+        cred_row = QHBoxLayout()
+        cred_row.setSpacing(8)
         jid_lbl = QLabel("Pilot JID:")
         jid_lbl.setStyleSheet(f"color:{TEXT_SECONDARY}; font-size:11px; font-weight:bold;")
-        input_row.addWidget(jid_lbl)
-
+        cred_row.addWidget(jid_lbl)
         self.jid_edit = QLineEdit()
-        self.jid_edit.setFixedHeight(28)
-        self.jid_edit.setPlaceholderText("pilot@goonfleet.com")
-        self.jid_edit.setStyleSheet(
-            f"background:{BG_PANEL}; color:{TEXT_PRIMARY}; border:1px solid {BORDER}; border-radius:4px; padding:2px 6px;"
-        )
-        input_row.addWidget(self.jid_edit, stretch=2)
-
+        self.jid_edit.setFixedHeight(34)
+        self.jid_edit.setPlaceholderText("pilot@example.com")
+        cred_row.addWidget(self.jid_edit, stretch=1)
         pwd_lbl = QLabel("Password:")
         pwd_lbl.setStyleSheet(f"color:{TEXT_SECONDARY}; font-size:11px; font-weight:bold;")
-        input_row.addWidget(pwd_lbl)
-
+        cred_row.addWidget(pwd_lbl)
         self.pwd_edit = QLineEdit()
         self.pwd_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.pwd_edit.setFixedHeight(28)
+        self.pwd_edit.setFixedHeight(34)
         self.pwd_edit.setPlaceholderText("••••••••")
-        self.pwd_edit.setStyleSheet(
-            f"background:{BG_PANEL}; color:{TEXT_PRIMARY}; border:1px solid {BORDER}; border-radius:4px; padding:2px 6px;"
-        )
-        input_row.addWidget(self.pwd_edit, stretch=2)
+        cred_row.addWidget(self.pwd_edit, stretch=1)
+        auth_layout.addLayout(cred_row)
 
+        conn_row = QHBoxLayout()
+        conn_row.setSpacing(8)
         host_lbl = QLabel("Host:")
         host_lbl.setStyleSheet(f"color:{TEXT_SECONDARY}; font-size:11px; font-weight:bold;")
-        input_row.addWidget(host_lbl)
-
+        conn_row.addWidget(host_lbl)
         self.host_edit = QLineEdit()
-        self.host_edit.setFixedHeight(28)
-        self.host_edit.setPlaceholderText("Optional Host Override")
-        self.host_edit.setStyleSheet(
-            f"background:{BG_PANEL}; color:{TEXT_PRIMARY}; border:1px solid {BORDER}; border-radius:4px; padding:2px 6px;"
-        )
-        input_row.addWidget(self.host_edit, stretch=2)
-
+        self.host_edit.setFixedHeight(34)
+        self.host_edit.setPlaceholderText("Optional host")
+        self.host_edit.setToolTip("Optional XMPP host override (leave blank to use the JID domain).")
+        conn_row.addWidget(self.host_edit, stretch=1)
         port_lbl = QLabel("Port:")
         port_lbl.setStyleSheet(f"color:{TEXT_SECONDARY}; font-size:11px; font-weight:bold;")
-        input_row.addWidget(port_lbl)
-
+        conn_row.addWidget(port_lbl)
         self.port_spin = QSpinBox()
-        self.port_spin.setFixedHeight(28)
+        self.port_spin.setFixedHeight(34)
+        self.port_spin.setMinimumWidth(72)
         self.port_spin.setRange(1, 65535)
         self.port_spin.setValue(5222)
-        self.port_spin.setStyleSheet(
-            f"background:{BG_PANEL}; color:{TEXT_PRIMARY}; border:1px solid {BORDER}; border-radius:4px;"
-        )
-        input_row.addWidget(self.port_spin)
-
+        conn_row.addWidget(self.port_spin)
         self.self_signed_cb = QCheckBox("Allow Self-Signed TLS")
         self.self_signed_cb.setStyleSheet(f"color:{TEXT_SECONDARY}; font-size:11px;")
-        input_row.addWidget(self.self_signed_cb)
-
+        self.self_signed_cb.setToolTip(
+            "Disables certificate and hostname checks. Auth is SASL PLAIN, so a MITM "
+            "can capture the password after a fake TLS handshake. Use only for a known "
+            "alliance server that presents a self-signed cert."
+        )
+        self.self_signed_cb.stateChanged.connect(self._on_self_signed_toggled)
+        conn_row.addWidget(self.self_signed_cb)
         self.connect_btn = QPushButton("Connect")
-        self.connect_btn.setFixedHeight(28)
+        self.connect_btn.setFixedHeight(34)
         self.connect_btn.setStyleSheet(radar_accent_btn_css())
         self.connect_btn.clicked.connect(self._on_toggle_connect)
-        input_row.addWidget(self.connect_btn)
-
-        auth_layout.addLayout(input_row)
+        conn_row.addWidget(self.connect_btn)
+        auth_layout.addLayout(conn_row)
         root.addWidget(auth_frame)
 
         # 2. Main Content Splitter (Left: Channels, DMs, Directory | Right: Conversation Stream)
@@ -211,9 +206,6 @@ class XMPPTabWidget(QWidget):
         self.search_edit = QLineEdit()
         self.search_edit.setFixedHeight(26)
         self.search_edit.setPlaceholderText("🔍 Filter channels or pilots...")
-        self.search_edit.setStyleSheet(
-            f"background:{BG_PANEL}; color:{TEXT_PRIMARY}; border:1px solid {BORDER_MUTED}; border-radius:4px; padding:2px 6px; font-size:11px;"
-        )
         self.search_edit.textChanged.connect(self._on_search_filter_changed)
         l_layout.addWidget(self.search_edit)
 
@@ -234,9 +226,6 @@ class XMPPTabWidget(QWidget):
         self.join_edit = QLineEdit()
         self.join_edit.setFixedHeight(26)
         self.join_edit.setPlaceholderText("room@conference.domain")
-        self.join_edit.setStyleSheet(
-            f"background:{BG_PANEL}; color:{TEXT_PRIMARY}; border:1px solid {BORDER}; border-radius:4px; padding:2px 4px; font-size:11px;"
-        )
         self.join_edit.returnPressed.connect(self._on_join_room)
         join_row.addWidget(self.join_edit, stretch=1)
 
@@ -289,6 +278,7 @@ class XMPPTabWidget(QWidget):
         self.stream_browser = QTextBrowser()
         self.stream_browser.setOpenExternalLinks(False)
         self.stream_browser.anchorClicked.connect(self._on_anchor_clicked)
+        self.stream_browser.document().setMaximumBlockCount(500)
         self.stream_browser.setStyleSheet(
             f"QTextBrowser {{ background:{BG_PANEL}; color:{TEXT_PRIMARY}; border:1px solid {BORDER_MUTED}; border-radius:4px; padding:6px; font-size:12px; }}"
         )
@@ -299,9 +289,6 @@ class XMPPTabWidget(QWidget):
         self.comp_edit = QLineEdit()
         self.comp_edit.setFixedHeight(30)
         self.comp_edit.setPlaceholderText("Compose message to active channel or pilot... (Enter to send)")
-        self.comp_edit.setStyleSheet(
-            f"background:{BG_PANEL}; color:{TEXT_PRIMARY}; border:1px solid {BORDER}; border-radius:4px; padding:2px 8px;"
-        )
         self.comp_edit.returnPressed.connect(self._on_send_message)
         comp_row.addWidget(self.comp_edit, stretch=1)
 
@@ -321,14 +308,24 @@ class XMPPTabWidget(QWidget):
         self._refresh_chat_tree()
         self._append_system_notice("XMPP client ready. Enter alliance JID and password to establish connection.")
 
+    def unsubscribe_events(self) -> None:
+        bus = get_event_bus()
+        bus.unsubscribe(XMPPConnectionStateChangedEvent, self._on_bus_state)
+        bus.unsubscribe(XMPPMessageReceivedEvent, self._on_bus_message)
+        bus.unsubscribe(XMPPRoomJoinedEvent, self._on_bus_room_joined)
+        bus.unsubscribe(XMPPRosterUpdatedEvent, self._on_bus_roster)
+        bus.unsubscribe(XMPPChannelDiscoveredEvent, self._on_bus_channel)
+        bus.unsubscribe(XMPPDirectoryDiscoveredEvent, self._on_bus_directory)
+
     def _wire_signals(self):
-        """Wires subsystem callbacks to Qt signals via multicast listeners (preserves internal service layer handling)."""
-        self.xmpp_subsystem.add_state_listener(lambda state, err: self._sig_state_changed.emit(state.value, err))
-        self.xmpp_subsystem.add_message_listener(lambda msg: self._sig_message_received.emit(msg))
-        self.xmpp_subsystem.add_room_joined_listener(lambda room, nick, subj: self._sig_room_joined.emit(room, nick, subj))
-        self.xmpp_subsystem.add_roster_listener(lambda roster: self._sig_roster_updated.emit(len(roster)))
-        self.xmpp_subsystem.add_channel_discovered_listener(lambda ch: self._sig_channel_discovered.emit(ch))
-        self.xmpp_subsystem.add_directory_discovered_listener(lambda rooms: self._sig_directory_discovered.emit(rooms))
+        """Subscribe to EventBus XMPP events (marshalled onto the GUI thread)."""
+        bus = get_event_bus()
+        bus.subscribe(XMPPConnectionStateChangedEvent, self._on_bus_state)
+        bus.subscribe(XMPPMessageReceivedEvent, self._on_bus_message)
+        bus.subscribe(XMPPRoomJoinedEvent, self._on_bus_room_joined)
+        bus.subscribe(XMPPRosterUpdatedEvent, self._on_bus_roster)
+        bus.subscribe(XMPPChannelDiscoveredEvent, self._on_bus_channel)
+        bus.subscribe(XMPPDirectoryDiscoveredEvent, self._on_bus_directory)
 
         self._sig_state_changed.connect(self._on_state_changed_gui)
         self._sig_message_received.connect(self._on_message_received_gui)
@@ -336,6 +333,28 @@ class XMPPTabWidget(QWidget):
         self._sig_roster_updated.connect(self._on_roster_updated_gui)
         self._sig_channel_discovered.connect(self._on_channel_discovered_gui)
         self._sig_directory_discovered.connect(self._on_directory_discovered_gui)
+
+    def _on_bus_state(self, evt: XMPPConnectionStateChangedEvent) -> None:
+        self._sig_state_changed.emit(evt.state, evt.error_message)
+
+    def _on_bus_message(self, evt: XMPPMessageReceivedEvent) -> None:
+        if evt.message is not None:
+            self._sig_message_received.emit(evt.message)
+
+    def _on_bus_room_joined(self, evt: XMPPRoomJoinedEvent) -> None:
+        self._sig_room_joined.emit(evt.room_jid, evt.nickname, evt.subject)
+
+    def _on_bus_roster(self, evt: XMPPRosterUpdatedEvent) -> None:
+        self._sig_roster_updated.emit(evt.contacts_count)
+
+    def _on_bus_channel(self, evt: XMPPChannelDiscoveredEvent) -> None:
+        if evt.channel is not None:
+            self._sig_channel_discovered.emit(evt.channel)
+        else:
+            self._sig_roster_updated.emit(0)
+
+    def _on_bus_directory(self, evt: XMPPDirectoryDiscoveredEvent) -> None:
+        self._sig_directory_discovered.emit(self.xmpp_subsystem.get_directory_rooms())
 
     def _set_inputs_enabled(self, enabled: bool):
         """Enables or disables credential input controls during active connection sessions."""
@@ -345,11 +364,19 @@ class XMPPTabWidget(QWidget):
         self.port_spin.setEnabled(enabled)
         self.self_signed_cb.setEnabled(enabled)
 
+    def _on_self_signed_toggled(self, state: int) -> None:
+        if state:
+            self._append_system_notice(
+                "Self-signed TLS is enabled: certificate and hostname checks are off. "
+                "SASL PLAIN will send your password to whoever completed the handshake."
+            )
+
     def _on_toggle_connect(self):
         current_state = self.xmpp_subsystem.client.state
         if current_state in (XMPPConnectionState.CONNECTED, XMPPConnectionState.CONNECTING, XMPPConnectionState.AUTHENTICATING):
             self.xmpp_subsystem.disconnect()
             self.pwd_edit.clear()
+            self.pwd_edit.setText("")
             self._set_inputs_enabled(True)
             self.connect_btn.setText("Connect")
             self.connect_btn.setStyleSheet(radar_accent_btn_css())
@@ -363,7 +390,7 @@ class XMPPTabWidget(QWidget):
             pwd = self.pwd_edit.text()
             if not jid:
                 self.jid_edit.setFocus()
-                self._append_system_notice("Please enter a valid Pilot JID (e.g. pilot@alliance.net).")
+                self._append_system_notice("Please enter a valid Pilot JID (e.g. pilot@example.com).")
                 return
             if not pwd:
                 self.pwd_edit.setFocus()
@@ -390,7 +417,7 @@ class XMPPTabWidget(QWidget):
             self.connect_btn.setStyleSheet(btn_secondary_css())
             self.status_badge.setText("🟡 Connecting...")
             self.status_badge.setStyleSheet(
-                f"background:#854d0e; color:#fef08a; font-weight:bold; font-size:11px; padding:3px 8px; border-radius:4px; border:1px solid #ca8a04;"
+                "background:#854d0e; color:#fef08a; font-weight:bold; font-size:11px; padding:3px 8px; border-radius:4px; border:1px solid #ca8a04;"
             )
             self._append_system_notice(f"Establishing TCP socket to XMPP host {cfg.domain}:{cfg.port}...")
 
@@ -401,7 +428,7 @@ class XMPPTabWidget(QWidget):
         if state_str == XMPPConnectionState.CONNECTING.value:
             self.status_badge.setText("🟡 Connecting...")
             self.status_badge.setStyleSheet(
-                f"background:#854d0e; color:#fef08a; font-weight:bold; font-size:11px; padding:3px 8px; border-radius:4px; border:1px solid #ca8a04;"
+                "background:#854d0e; color:#fef08a; font-weight:bold; font-size:11px; padding:3px 8px; border-radius:4px; border:1px solid #ca8a04;"
             )
             self.connect_btn.setText("Cancel")
             self.connect_btn.setStyleSheet(btn_secondary_css())
@@ -412,14 +439,14 @@ class XMPPTabWidget(QWidget):
         elif state_str == XMPPConnectionState.AUTHENTICATING.value:
             self.status_badge.setText("🟡 Authenticating...")
             self.status_badge.setStyleSheet(
-                f"background:#854d0e; color:#fef08a; font-weight:bold; font-size:11px; padding:3px 8px; border-radius:4px; border:1px solid #ca8a04;"
+                "background:#854d0e; color:#fef08a; font-weight:bold; font-size:11px; padding:3px 8px; border-radius:4px; border:1px solid #ca8a04;"
             )
             self._append_system_notice("TLS session negotiated. Authenticating SASL credentials...")
 
         elif state_str == XMPPConnectionState.CONNECTED.value:
             self.status_badge.setText("🟢 Connected")
             self.status_badge.setStyleSheet(
-                f"background:#14532d; color:#bbf7d0; font-weight:bold; font-size:11px; padding:3px 8px; border-radius:4px; border:1px solid #16a34a;"
+                "background:#14532d; color:#bbf7d0; font-weight:bold; font-size:11px; padding:3px 8px; border-radius:4px; border:1px solid #16a34a;"
             )
             self.connect_btn.setText("Disconnect")
             self.connect_btn.setStyleSheet(btn_secondary_css())
@@ -432,7 +459,7 @@ class XMPPTabWidget(QWidget):
         elif state_str == XMPPConnectionState.ERROR.value:
             self.status_badge.setText("🔴 Error")
             self.status_badge.setStyleSheet(
-                f"background:#7f1d1d; color:#fecaca; font-weight:bold; font-size:11px; padding:3px 8px; border-radius:4px; border:1px solid #dc2626;"
+                "background:#7f1d1d; color:#fecaca; font-weight:bold; font-size:11px; padding:3px 8px; border-radius:4px; border:1px solid #dc2626;"
             )
             self.connect_btn.setText("Connect")
             self.connect_btn.setStyleSheet(radar_accent_btn_css())
@@ -756,13 +783,20 @@ class XMPPTabWidget(QWidget):
 
     def _on_anchor_clicked(self, url: QUrl):
         url_str = url.toString() or url.path()
-        if url_str.startswith("ask_aura:") or url_str.startswith("ask-aura:"):
+        scheme = (url.scheme() or "").lower()
+        if url_str.startswith("ask_aura:") or url_str.startswith("ask-aura:") or scheme in ("ask_aura", "ask-aura"):
             prefix = "ask_aura:" if url_str.startswith("ask_aura:") else "ask-aura:"
-            query = urllib.parse.unquote(url_str[len(prefix):])
+            if url_str.startswith(prefix):
+                query = urllib.parse.unquote(url_str[len(prefix):])
+            else:
+                query = urllib.parse.unquote(url.path() or url_str)
             self.ask_aura_requested.emit(query)
-        elif url_str.startswith("opendm:") or url_str.startswith("open_dm:"):
+        elif url_str.startswith("opendm:") or url_str.startswith("open_dm:") or scheme in ("opendm", "open_dm"):
             prefix = "opendm:" if url_str.startswith("opendm:") else "open_dm:"
-            target_jid = url_str[len(prefix):]
+            if url_str.startswith("opendm:") or url_str.startswith("open_dm:"):
+                target_jid = url_str[len(prefix):]
+            else:
+                target_jid = url.path() or url_str
             self.selected_target = target_jid
             self.is_groupchat = False
             self._unread_counts[target_jid.lower()] = 0
@@ -771,8 +805,10 @@ class XMPPTabWidget(QWidget):
             self.stream_title_lbl.setText(f"📡 <b>Stream: 💬 Pilot: {pilot_name} ({target_jid})</b>")
             self.comp_edit.setPlaceholderText(f"Compose direct message to {pilot_name}... (Enter to send)")
             self._load_conversation_history()
-        else:
+        elif scheme in ("http", "https"):
             QDesktopServices.openUrl(url)
+        else:
+            self._append_system_notice(f"Blocked non-http(s) link ({scheme or 'unknown scheme'}).")
 
     def _append_system_notice(self, notice: str):
         ts = time.strftime("%H:%M:%S")
@@ -802,15 +838,21 @@ class XMPPTabWidget(QWidget):
         sender = msg.sender_nick or msg.sender_jid.split("@", 1)[0]
         bare_jid = msg.sender_jid.split("/", 1)[0]
         html = f"""
-        <div style='background:{BG_ELEVATED}; border:1px solid #a78bfa; border-left:4px solid #a78bfa; border-radius:4px; padding:8px 10px; margin:6px 0;'>
-          <div style='display:flex; justify-content:space-between; margin-bottom:4px;'>
-            <b style='color:#c4b5fd; font-size:12px;'>💬 DIRECT MESSAGE FROM {escape_html(sender)}</b>
-            <span style='color:{TEXT_HINT}; font-size:11px;'>{ts}</span>
-          </div>
+        <div style='text-align:left; background:{BG_ELEVATED}; border:1px solid #a78bfa; border-left:4px solid #a78bfa; border-radius:4px; padding:8px 10px; margin:6px 0;'>
+          <table width='100%' style='margin-bottom:4px; border:none;' cellspacing='0' cellpadding='0'>
+            <tr>
+              <td align='left' style='vertical-align:middle;'><b style='color:#c4b5fd; font-size:12px;'>💬 DIRECT MESSAGE FROM {escape_html(sender)}</b></td>
+              <td align='right' style='vertical-align:middle; color:{TEXT_HINT}; font-size:11px;'>{ts}</td>
+            </tr>
+          </table>
           <div style='color:{TEXT_PRIMARY}; font-size:12px; margin-bottom:6px; background:{BG_PANEL}; border:1px solid {BORDER_MUTED}; border-radius:3px; padding:6px;'>{escape_html(msg.body)}</div>
-          <div style='text-align:right;'>
-            <a href='opendm:{escape_html(bare_jid)}' style='color:{ACCENT}; text-decoration:none; font-size:11px; font-weight:bold; background:{BG_PANEL}; border:1px solid {ACCENT}; border-radius:3px; padding:3px 8px;'>💬 Open Direct Chat with {escape_html(sender)} ➤</a>
-          </div>
+          <table width='100%' style='margin-top:4px; border:none;' cellspacing='0' cellpadding='0'>
+            <tr>
+              <td align='right'>
+                <a href='opendm:{escape_html(bare_jid)}' style='color:{TEXT_PRIMARY}; text-decoration:none; font-size:11px; font-weight:bold; background:{ACCENT_DIM}; border:1px solid {ACCENT}; border-radius:3px; padding:3px 8px;'>💬 Open Direct Chat with {escape_html(sender)} ➤</a>
+              </td>
+            </tr>
+          </table>
         </div>
         """
         self.stream_browser.append(html)
@@ -822,30 +864,36 @@ class XMPPTabWidget(QWidget):
             "#f97316" if msg.priority == XMPPBroadcastPriority.STRATOP else "#38bdf8"
         )
 
-        target_sys = p.target_system if p and p.target_system else "Unknown"
+        staging_sys = p.staging_system if (p and p.staging_system) else (p.target_system if (p and p.target_system) else "Unknown")
         fc = p.fc_name if p and p.fc_name else (msg.sender_nick or "Alliance FC")
         doc = ", ".join(p.doctrine_ships) if p and p.doctrine_ships else "All Available Combat Hulls"
 
         # Ask AURA prompt preparation
         tactical_query = (
-            f"Tactical evaluation of alliance broadcast ping: Target System '{target_sys}', "
+            f"Tactical evaluation of alliance broadcast ping: Staging System '{staging_sys}', "
             f"FC '{fc}', Doctrine '{doc}', Priority '{msg.priority.value}'. "
             f"Please analyze tactical threats, gate choke points, and recommend counter-fitting / positioning."
         )
         encoded_query = urllib.parse.quote(tactical_query)
 
         html = f"""
-        <div style='background:{BG_ELEVATED}; border:1px solid {priority_color}; border-left:5px solid {priority_color}; border-radius:4px; padding:10px; margin:8px 0;'>
-          <div style='display:flex; justify-content:space-between; margin-bottom:6px;'>
-            <b style='color:{priority_color}; font-size:13px; letter-spacing:1px;'>🚨 ALLIANCE FLEET PING [{msg.priority.value.upper()}]</b>
-            <span style='color:{TEXT_HINT}; font-size:11px;'>{ts}</span>
-          </div>
-          <div style='color:{TEXT_PRIMARY}; font-size:12px; margin-bottom:4px;'><b>FC:</b> {escape_html(fc)} | <b>Target System:</b> <span style='color:{ACCENT}; font-weight:bold;'>{escape_html(target_sys)}</span></div>
+        <div style='text-align:left; background:{BG_ELEVATED}; border:1px solid {priority_color}; border-left:5px solid {priority_color}; border-radius:4px; padding:10px; margin:8px 0;'>
+          <table width='100%' style='margin-bottom:6px; border:none;' cellspacing='0' cellpadding='0'>
+            <tr>
+              <td align='left' style='vertical-align:middle;'><b style='color:{priority_color}; font-size:13px; letter-spacing:1px;'>🚨 ALLIANCE FLEET PING [{msg.priority.value.upper()}]</b></td>
+              <td align='right' style='vertical-align:middle; color:{TEXT_HINT}; font-size:11px;'>{ts}</td>
+            </tr>
+          </table>
+          <div style='color:{TEXT_PRIMARY}; font-size:12px; margin-bottom:4px;'><b>FC:</b> {escape_html(fc)} | <b>Staging System:</b> <span style='color:{ACCENT}; font-weight:bold;'>{escape_html(staging_sys)}</span></div>
           <div style='color:{TEXT_SECONDARY}; font-size:12px; margin-bottom:6px;'><b>Doctrine Ships:</b> {escape_html(doc)}</div>
           <div style='background:{BG_PANEL}; border:1px solid {BORDER_MUTED}; border-radius:3px; padding:8px; color:{TEXT_PRIMARY}; font-family:monospace; font-size:11px; white-space:pre-wrap; margin-bottom:6px;'>{escape_html(msg.body)}</div>
-          <div style='text-align:right;'>
-            <a href='ask_aura:{encoded_query}' style='color:{ACCENT}; text-decoration:none; font-size:11px; font-weight:bold; background:{BG_PANEL}; border:1px solid {ACCENT}; border-radius:3px; padding:4px 8px;'>🤖 Ask A.U.R.A. Analysis ➤</a>
-          </div>
+          <table width='100%' style='margin-top:6px; border:none;' cellspacing='0' cellpadding='0'>
+            <tr>
+              <td align='right'>
+                <a href='ask_aura:{encoded_query}' style='color:{TEXT_PRIMARY}; text-decoration:none; font-size:11px; font-weight:bold; background:{ACCENT_DIM}; border:1px solid {ACCENT}; border-radius:3px; padding:4px 10px;'>⚡ ASK A.U.R.A. ANALYSIS ➤</a>
+              </td>
+            </tr>
+          </table>
         </div>
         """
         self.stream_browser.append(html)

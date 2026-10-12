@@ -64,9 +64,6 @@ def find_default_chatlog_dir() -> str:
     return os.path.abspath(os.path.join(home, "Documents", "EVE", "logs", "Chatlogs"))
 
 
-find_default_chatlog_dir = find_default_chatlog_dir
-
-
 def find_default_gamelog_dir(chatlog_dir: Optional[str] = None) -> str:
     """Gamelogs sit beside Chatlogs under .../EVE/logs/Gamelogs."""
     if chatlog_dir:
@@ -139,8 +136,7 @@ def _is_gamelog_file(filepath: str) -> bool:
 class LiveChatMonitor(QThread):
     """Polls EVE chat/gamelog files and emits intel plus location signals."""
 
-    intel_received = pyqtSignal(dict)
-    critical_threat_detected = pyqtSignal(dict)
+    intel_line_received = pyqtSignal(str, str)
     active_channels_updated = pyqtSignal(list)
     characters_updated = pyqtSignal(list)
     status_updated = pyqtSignal(str, bool)
@@ -170,8 +166,8 @@ class LiveChatMonitor(QThread):
         self._character_locations: Dict[str, Dict[str, Any]] = {}
         self._known_characters: Set[str] = set()
         self.selected_character: Optional[str] = None
-        self._recent_intel_hashes: Dict[str, float] = {}
         self._need_bootstrap = True
+        self._last_active_channels: List[str] = []
 
     def set_selected_character(self, character_name: Optional[str]) -> None:
         if not character_name or character_name.strip() in ("Auto", "All", "None", ""):
@@ -210,7 +206,8 @@ class LiveChatMonitor(QThread):
 
     def stop(self) -> None:
         self.running = False
-        self.wait(1500)
+        from core.lifecycle import CHAT_MONITOR_JOIN_MS
+        self.wait(CHAT_MONITOR_JOIN_MS)
 
     def run(self) -> None:
         self.running = True
@@ -222,7 +219,7 @@ class LiveChatMonitor(QThread):
                 if missing_logged_for != self.log_dir:
                     log_diagnostic_error(
                         AURAErrorCode.ERR_4001_CHATLOG_DIR_MISSING,
-                        None,
+                        FileNotFoundError(self.log_dir),
                         f"LiveChatMonitor.log_dir missing: {self.log_dir}",
                     )
                     missing_logged_for = self.log_dir
@@ -314,6 +311,22 @@ class LiveChatMonitor(QThread):
         self.last_dir_scan_time = now
         return self.cached_files
 
+    def _prune_inactive_log_maps(self, active_paths: List[str]) -> None:
+        """Drop seek offsets and per-file character maps for logs no longer in the active set."""
+        active = set(active_paths)
+        for path in list(self.file_positions.keys()):
+            if path not in active:
+                self.file_positions.pop(path, None)
+                self.known_files.discard(path)
+                self._file_characters.pop(path, None)
+        still_known = set(self._file_characters.values())
+        if still_known != self._known_characters:
+            self._known_characters = still_known
+            self.characters_updated.emit(sorted(self._known_characters))
+        for name in list(self._character_locations.keys()):
+            if name not in self._known_characters:
+                self._character_locations.pop(name, None)
+
     def _emit_location(self, hit: Optional[Dict[str, Any]], filepath: Optional[str] = None) -> None:
         if not hit:
             return
@@ -397,7 +410,14 @@ class LiveChatMonitor(QThread):
             elif not bootstrapped_game and _is_gamelog_file(path):
                 self._ingest_location_prefix(path)
                 bootstrapped_game = True
-        self.active_channels_updated.emit(active_names)
+        self._emit_active_channels(active_names)
+        self._prune_inactive_log_maps(files)
+
+    def _emit_active_channels(self, names: List[str]) -> None:
+        if names == self._last_active_channels:
+            return
+        self._last_active_channels = list(names)
+        self.active_channels_updated.emit(names)
 
     def _process_text(self, filepath: str, text: str, channel_name: str) -> None:
         is_local = _is_local_file(filepath)
@@ -420,24 +440,11 @@ class LiveChatMonitor(QThread):
                 continue
             if not parsed:
                 continue
-            time_key = parsed.get("time_str") or parsed.get("timestamp") or ""
-            speaker_key = (parsed.get("speaker") or "").lower()
-            clean_msg_key = (parsed.get("clean_msg") or "").lower()
-            ch_key = (parsed.get("channel") or channel_name).lower()
-            dedup_key = f"{ch_key}|{speaker_key}|{time_key}|{clean_msg_key}"
-            now = time.time()
-            if now - self._recent_intel_hashes.get(dedup_key, 0.0) < 25.0:
-                continue
-            self._recent_intel_hashes[dedup_key] = now
-            if len(self._recent_intel_hashes) > 400:
-                cutoff = now - 60.0
-                self._recent_intel_hashes = {k: v for k, v in self._recent_intel_hashes.items() if v >= cutoff}
-            self.intel_received.emit(parsed)
-            if parsed.get("is_critical"):
-                self.critical_threat_detected.emit(parsed)
+            self.intel_line_received.emit(raw_line, channel_name)
 
     def _check_for_new_data(self) -> None:
         current_files = self._get_active_log_files(force_rescan=False)
+        self._prune_inactive_log_maps(current_files)
         active_names: List[str] = []
 
         for path in current_files:
@@ -485,7 +492,7 @@ class LiveChatMonitor(QThread):
                     f"LiveChatMonitor._check_for_new_data({path})",
                 )
 
-        self.active_channels_updated.emit(active_names)
+        self._emit_active_channels(active_names)
 
     def simulate_intel_line(self, line: str, channel: str = "Delve.Intel") -> None:
         try:
@@ -499,6 +506,4 @@ class LiveChatMonitor(QThread):
             return
         if not parsed:
             return
-        self.intel_received.emit(parsed)
-        if parsed.get("is_critical"):
-            self.critical_threat_detected.emit(parsed)
+        self.intel_line_received.emit(line, channel)

@@ -1,0 +1,10 @@
+aura-eve-tool (0.6.0~alpha.4) unstable; urgency=medium
+
+  * Feature parity with the Windows v0.6.0-alpha.4 release:
+    - Port D-Scan and Mumble VOIP subsystems and UI tabs
+    - Add core eve_modules_data / eve_ships_data datasets and fitting dogma math
+    - Cross-platform core/paths.py (XDG on Linux, %LOCALAPPDATA% on Windows)
+    - Linux-native launch fixes (bootstrap, llama.cpp shared library names)
+  * Add dual-distro packaging: Debian source package and Fedora RPM spec.
+
+ -- JeffTheNerdDev96 <JeffTheNerdDev96@users.noreply.github.com>  Fri, 12 Dec 2025 12:00:00 +0000

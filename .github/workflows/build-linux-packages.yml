@@ -1,0 +1,71 @@
+name: Build Linux Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  deb:
+    name: Ubuntu .deb
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev debhelper fakeroot
+
+      - name: Build .deb
+        run: bash packaging/ubuntu/build_deb.sh
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aura-deb
+          path: dist/*.deb
+          if-no-files-found: error
+
+  rpm:
+    name: Fedora .rpm
+    runs-on: ubuntu-24.04
+    container: fedora:latest
+    steps:
+      - name: Install build tooling
+        run: dnf install -y rpm-build tar gzip sed findutils
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build .rpm
+        run: bash packaging/fedora/build_rpm.sh
+
+      - name: Upload .rpm artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aura-rpm
+          path: dist/*.rpm
+          if-no-files-found: error
+
+  release:
+    name: Attach artifacts to release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [deb, rpm]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.*
+          generate_release_notes: true
