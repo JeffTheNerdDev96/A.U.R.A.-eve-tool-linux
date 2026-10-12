@@ -22,7 +22,6 @@ Application lifecycle: temp-file cleanup and ordered shutdown of threads and neu
 from __future__ import annotations
 
 import gc
-import os
 import shutil
 import sys
 import threading
@@ -30,20 +29,28 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .error_handler import log_soft_failure
 from .paths import get_app_root, get_logs_dir
 
 WORKER_JOIN_MS = 2000
 CHAT_MONITOR_JOIN_MS = 1500
+XMPP_JOIN_MS = 3000
+VOIP_JOIN_MS = 5000
+VOIP_CONNECT_TIMEOUT_SEC = 30
 
 
-def cleanup_temp_files() -> None:
-    """Purges orphaned __pycache__ and stale non-crash logs."""
-    pc = Path(get_app_root()) / "__pycache__"
-    if pc.exists():
-        try:
-            shutil.rmtree(pc, ignore_errors=True)
-        except OSError:
-            pass
+def cleanup_temp_files(*, purge_bytecode: bool = False) -> None:
+    """
+    Purges stale non-crash logs and orphaned temp artifacts.
+    
+    """
+    if purge_bytecode:
+        pc = Path(get_app_root()) / "__pycache__"
+        if pc.exists():
+            try:
+                shutil.rmtree(pc, ignore_errors=True)
+            except OSError:
+                pass
 
     log_dir = Path(get_logs_dir())
     if not log_dir.exists():
@@ -67,7 +74,8 @@ def _log_shutdown_error(exc: Exception, context: str) -> None:
         from .error_handler import AURAErrorCode, log_diagnostic_error
         log_diagnostic_error(AURAErrorCode.ERR_5001_WORKER_CRASH, exc, context)
     except Exception:
-        sys.stderr.write(f"[A.U.R.A.] Shutdown error ({context}): {exc}\n")
+        if sys.stderr is not None:
+            sys.stderr.write(f"[A.U.R.A.] Shutdown error ({context}): {exc}\n")
 
 
 def shutdown_application(window: Any | None = None) -> None:
@@ -83,6 +91,24 @@ def shutdown_application(window: Any | None = None) -> None:
                 window.idle_timer.stop()
         except Exception as exc:
             _log_shutdown_error(exc, "shutdown: idle_timer")
+
+        try:
+            expire_timer = getattr(window, "_intel_expire_timer", None)
+            if expire_timer is not None and hasattr(expire_timer, "stop"):
+                expire_timer.stop()
+        except Exception as exc:
+            _log_shutdown_error(exc, "shutdown: _intel_expire_timer")
+
+        # Stop tab-level timers
+        for tab_attr, timer_attr in (("anokis_tab", "poll_timer"), ("map_tab", "_prune_timer")):
+            try:
+                tab_widget = getattr(window, tab_attr, None)
+                if tab_widget is not None:
+                    timer = getattr(tab_widget, timer_attr, None)
+                    if timer is not None and hasattr(timer, "stop"):
+                        timer.stop()
+            except Exception as exc:
+                _log_shutdown_error(exc, f"shutdown: {tab_attr}.{timer_attr}")
 
         try:
             if hasattr(window, "tray_icon") and window.tray_icon:
@@ -102,10 +128,16 @@ def shutdown_application(window: Any | None = None) -> None:
                     worker.stop()
                 worker.quit()
                 worker.wait(WORKER_JOIN_MS)
+            for abandoned in list(getattr(window, "_abandoned_workers", []) or []):
+                try:
+                    if abandoned.isRunning():
+                        abandoned.wait(WORKER_JOIN_MS)
+                except Exception as exc:
+                    log_soft_failure("shutdown: abandoned_worker.wait", exc)
         except Exception as exc:
             _log_shutdown_error(exc, "shutdown: worker_thread")
 
-        # 2. Stop live chat monitor thread
+        # 2. Stop live chat monitor thread (stop() joins for CHAT_MONITOR_JOIN_MS)
         try:
             monitor = getattr(window, "chat_monitor", None)
             if monitor is not None and monitor.isRunning():
@@ -113,7 +145,23 @@ def shutdown_application(window: Any | None = None) -> None:
         except Exception as exc:
             _log_shutdown_error(exc, "shutdown: chat_monitor")
 
-        # 3. Unload neural model and coprocessors
+        # 3. Stop XMPP worker (adapter joins the socket thread and wipes credentials)
+        try:
+            xmpp = getattr(window, "xmpp_subsystem", None)
+            if xmpp is not None and hasattr(xmpp, "disconnect"):
+                xmpp.disconnect()
+        except Exception as exc:
+            _log_shutdown_error(exc, "shutdown: xmpp_subsystem")
+
+        # 3b. Stop VOIP worker (Mumble thread joined inside adapter, credentials wiped)
+        try:
+            voip = getattr(window, "voip_subsystem", None)
+            if voip is not None and hasattr(voip, "disconnect"):
+                voip.disconnect()
+        except Exception as exc:
+            _log_shutdown_error(exc, "shutdown: voip_subsystem")
+
+        # 4. Unload neural model and coprocessors
         try:
             if engine is not None:
                 engine.unload_model()
@@ -124,8 +172,18 @@ def shutdown_application(window: Any | None = None) -> None:
         except Exception as exc:
             _log_shutdown_error(exc, "shutdown: engine")
 
-        # 4. Stop all attached subsystems
-        for sub_attr in ("intel_subsystem", "map_subsystem", "fleet_comp_subsystem", "fitting_subsystem", "wormhole_subsystem", "xmpp_subsystem", "ai_subsystem"):
+        # 5. Stop remaining subsystems (AISubsystem.stop is a no-op if the engine already unloaded)
+        for sub_attr in (
+            "intel_subsystem",
+            "dscan_subsystem",
+            "map_subsystem",
+            "fleet_comp_subsystem",
+            "wormhole_subsystem",
+            "xmpp_subsystem",
+            "voip_subsystem",
+            "fitting_subsystem",
+            "ai_subsystem",
+        ):
             try:
                 sub = getattr(window, sub_attr, None)
                 if sub is not None and hasattr(sub, "stop"):
@@ -133,7 +191,7 @@ def shutdown_application(window: Any | None = None) -> None:
             except Exception as exc:
                 _log_shutdown_error(exc, f"shutdown: {sub_attr}")
 
-        # 5. Clear chat history and memory buffers
+        # 6. Clear chat history and memory buffers
         try:
             if hasattr(window, "chat_history"):
                 window.chat_history.clear()
@@ -145,6 +203,14 @@ def shutdown_application(window: Any | None = None) -> None:
             _log_shutdown_error(exc, "shutdown: memory_buffers")
 
         window._shutdown_done = True
+
+        try:
+            if hasattr(window, "_unsubscribe_event_bus"):
+                window._unsubscribe_event_bus()
+            from .event_bus import get_event_bus
+            get_event_bus().clear()
+        except Exception as exc:
+            _log_shutdown_error(exc, "shutdown: event_bus")
 
     cleanup_temp_files()
     gc.collect()
@@ -163,6 +229,7 @@ def install_thread_excepthook() -> None:
             )
         except Exception:
             if args.exc_value is not None:
-                sys.stderr.write(f"[A.U.R.A.] Unhandled thread error: {args.exc_value}\n")
+                if sys.stderr is not None:
+                    sys.stderr.write(f"[A.U.R.A.] Unhandled thread error: {args.exc_value}\n")
 
     threading.excepthook = _thread_excepthook

@@ -366,7 +366,8 @@ class HardwareDetector:
                 devices["openvino_probe_error"] = str(e)
 
         if apply_profile:
-            return apply_install_mask(devices)
+            devices["install_profile"] = load_install_profile()
+            return apply_install_mask(devices, devices["install_profile"])
         return devices
 
     @property
@@ -400,6 +401,131 @@ class HardwareDetector:
         if self.devices.get("gpu", {}).get("available"):
             return "GPU"
         return "CPU"
+
+    # ------------------------------------------------------------------
+    # Cross-platform detector API (parity with the Windows hardware layer).
+    # Consumers (AI engine, UI badge, workload router) rely on these names.
+    # ------------------------------------------------------------------
+    @property
+    def has_gpu(self) -> bool:
+        return bool(self.devices.get("gpu", {}).get("available"))
+
+    @property
+    def gpu_name(self) -> str:
+        return str(self.devices.get("gpu", {}).get("device_name", "GPU"))
+
+    @property
+    def gpu_vendor(self) -> str:
+        return str(self.devices.get("gpu", {}).get("vendor", "Generic"))
+
+    @property
+    def has_dgpu(self) -> bool:
+        gpu = self.devices.get("gpu", {})
+        return bool(gpu.get("available") and not gpu.get("is_integrated", False))
+
+    @property
+    def has_igpu(self) -> bool:
+        gpu = self.devices.get("gpu", {})
+        return bool(gpu.get("available") and gpu.get("is_integrated", False))
+
+    @property
+    def dgpu_name(self) -> str:
+        for gpu in self.devices.get("gpus", []):
+            if not gpu.get("is_integrated", False):
+                return str(gpu.get("name", "dGPU"))
+        return self.gpu_name if self.has_dgpu else "dGPU"
+
+    @property
+    def igpu_name(self) -> str:
+        for gpu in self.devices.get("gpus", []):
+            if gpu.get("is_integrated", False):
+                return str(gpu.get("name", "iGPU"))
+        return "iGPU"
+
+    @property
+    def has_nvidia(self) -> bool:
+        return any("nvidia" in str(g.get("vendor", "")).lower() for g in self.devices.get("gpus", []))
+
+    @property
+    def has_amd_gpu(self) -> bool:
+        return any(
+            "amd" in str(g.get("vendor", "")).lower() or "radeon" in str(g.get("vendor", "")).lower()
+            for g in self.devices.get("gpus", [])
+        )
+
+    @property
+    def has_intel_gpu(self) -> bool:
+        return any("intel" in str(g.get("vendor", "")).lower() for g in self.devices.get("gpus", []))
+
+    @property
+    def npu_vendor(self) -> str:
+        if self.devices.get("intel_npu", {}).get("available"):
+            return "Intel"
+        if self.devices.get("amd_npu", {}).get("available"):
+            return "AMD"
+        return "None"
+
+    @property
+    def npu_name(self) -> str:
+        for key in ("intel_npu", "amd_npu"):
+            if self.devices.get(key, {}).get("available"):
+                return str(self.devices.get(key, {}).get("device_name", "NPU"))
+        return "NPU"
+
+    @property
+    def npu_backend(self) -> str:
+        for key in ("intel_npu", "amd_npu"):
+            if self.devices.get(key, {}).get("available"):
+                return str(self.devices.get(key, {}).get("backend", "None"))
+        return "None"
+
+    @property
+    def is_intel_npu(self) -> bool:
+        return bool(self.devices.get("intel_npu", {}).get("available"))
+
+    @property
+    def is_amd_npu(self) -> bool:
+        return bool(self.devices.get("amd_npu", {}).get("available"))
+
+    @property
+    def cpu_name(self) -> str:
+        return str(self.devices.get("cpu", {}).get("device_name", "CPU"))
+
+    @property
+    def install_profile(self) -> HardwareProfile | None:
+        return self.devices.get("install_profile") or load_install_profile()
+
+    @property
+    def llama_wheel(self) -> str:
+        profile = self.install_profile or {}
+        return str(profile.get("llama_wheel", "cpu"))
+
+    @property
+    def coprocessor_kind(self) -> str:
+        return self.preferred_coprocessor_target(heavy=False)
+
+    def all_gpus_summary(self) -> str:
+        gpus = self.devices.get("gpus", [])
+        if not gpus:
+            return "No GPU"
+        return ", ".join(str(gpu.get("name", "GPU")) for gpu in gpus)
+
+    def get_summary_string(self) -> str:
+        parts = [self.cpu_name]
+        if self.has_gpu:
+            parts.append(self.gpu_name)
+        if self.has_npu:
+            parts.append(f"{self.npu_vendor} NPU")
+        return " + ".join(parts)
+
+    def get_live_summary_string(self) -> str:
+        return self.get_summary_string()
+
+    def get_routing_tooltip(self) -> str:
+        return self.get_summary_string()
+
+    def routing_standby_label(self) -> str:
+        return standby_label(self.install_profile)
 
 
 class HardwareRouter:
@@ -465,6 +591,139 @@ class HardwareRouter:
             "tier_id": 1,
             "tier_name": f"CPU Multi-Core Vector Mesh ({self.detector.cpu_threads}T)",
             "badge": f"⚡ CPU Multi-Core ({self.detector.cpu_threads}T)",
+            "color": "#10b981",
+            "bg_color": "#064e3b",
+            "strategy": "CPU",
+            "short_tag": "CPU",
+            "coprocessor_target": "NONE",
+            "hw_tag": "*CPU*",
+            "npu_vendor": "None",
+            "mode": "cpu_vector_mesh",
+        }
+
+
+class DynamicHardwareRouter(HardwareRouter):
+    """
+    Computes compute workload demand for A.U.R.A. and orchestrates heterogeneous
+    multi-hardware scaling across NPU, iGPU, dGPU, and CPU mesh on Linux.
+
+    Provides the ``hardware_plan`` contract (tier_id, tier_name, badge, colors,
+    strategy, coprocessor_target, hw_tag, npu_vendor, mode) consumed by the UI,
+    matching the Windows hardware layer.
+    """
+
+    def __init__(self, detector: Optional[HardwareDetector] = None):
+        super().__init__(detector)
+
+    def estimate_tokens(self, text: str) -> int:
+        if not text:
+            return 1
+        # Fast character heuristic: ~4 chars per token for dense technical text.
+        return max(1, len(text) // 4)
+
+    def route_workload(
+        self,
+        token_count: int,
+        has_image: bool = False,
+        has_doc: bool = False,
+        attachment_count: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        Routes workload across the heterogeneous hardware mesh automatically:
+          1. File / vision upload override -> engage all available compute units.
+          2. Heavy tactical reasoning / D-Scan (token_count > 350) -> full mesh.
+          3. Ambient / conversational queries -> energy-efficient NPU / primary GPU.
+        """
+        det = self.detector
+        npu_vendor = det.npu_vendor
+        has_npu = det.has_npu
+        has_gpu = det.has_gpu
+        has_dgpu = det.has_dgpu
+        has_igpu = det.has_igpu
+        gpu_name = det.gpu_name
+        gpu_vendor = det.gpu_vendor
+        gpu_label = gpu_strategy_label(det.install_profile, gpu_vendor)
+
+        has_attachments = has_image or has_doc or attachment_count > 0
+        is_heavy_workload = has_attachments or token_count > 350
+
+        installed = set((det.install_profile or {}).get("profiles") or [])
+        profile_locked = det.install_profile is not None
+        quad_installed = False
+        if profile_locked:
+            has_npu_stack = "intel_npu" in installed or "amd_npu" in installed
+            has_igpu_stack = "amd_igpu" in installed or "intel_igpu" in installed
+            has_dgpu_stack = any(p in installed for p in ("nvidia_dgpu", "amd_dgpu", "intel_dgpu"))
+            quad_installed = has_npu_stack and has_igpu_stack and has_dgpu_stack
+
+        # TIER 4: Heterogeneous quad-mesh (NPU + iGPU + dGPU + CPU).
+        if has_npu and has_dgpu and has_igpu and quad_installed:
+            return {
+                "tier_id": 4,
+                "tier_name": f"Heterogeneous Quad-Mesh ({npu_vendor} NPU + {det.dgpu_name} + {det.igpu_name} + CPU)",
+                "badge": f"⚡ Quad-Mesh: {npu_vendor} NPU + dGPU + iGPU + CPU",
+                "color": "#f43f5e",
+                "bg_color": "#4c0519",
+                "strategy": f"{npu_vendor} NPU + dGPU + iGPU + CPU",
+                "short_tag": "Quad-Mesh",
+                "coprocessor_target": det.preferred_coprocessor_target(heavy=True),
+                "hw_tag": f"*{npu_vendor} NPU + dGPU + iGPU + CPU*",
+                "npu_vendor": npu_vendor,
+                "mode": "quad_mesh",
+            }
+
+        # TIER 3 / 1: NPU present (Intel Core Ultra / AMD Ryzen AI).
+        if has_npu and has_gpu:
+            if is_heavy_workload:
+                gpu_desc = gpu_label if not has_igpu else det.igpu_name
+                return {
+                    "tier_id": 3,
+                    "tier_name": f"Full Compute Mesh ({npu_vendor} NPU + {gpu_desc} + CPU)",
+                    "badge": f"⚡ Full Mesh: {npu_vendor} NPU + {gpu_desc} + CPU",
+                    "color": "#f43f5e",
+                    "bg_color": "#4c0519",
+                    "strategy": f"{npu_vendor} NPU + {gpu_desc} + CPU",
+                    "short_tag": "NPU + GPU + CPU",
+                    "coprocessor_target": det.preferred_coprocessor_target(heavy=True),
+                    "hw_tag": f"*{npu_vendor} NPU + {gpu_desc} + CPU*",
+                    "npu_vendor": npu_vendor,
+                    "mode": "heavy_mesh",
+                }
+            return {
+                "tier_id": 1,
+                "tier_name": f"Tier 1: {npu_vendor} NPU Dedicated Core",
+                "badge": f"⚡ {npu_vendor} NPU Ambient Core",
+                "color": "#10b981",
+                "bg_color": "#064e3b",
+                "strategy": f"{npu_vendor} NPU",
+                "short_tag": "NPU",
+                "coprocessor_target": det.preferred_coprocessor_target(heavy=False),
+                "hw_tag": f"*{npu_vendor} NPU*",
+                "npu_vendor": npu_vendor,
+                "mode": "default_npu",
+            }
+
+        # TIER 2: GPU + CPU mesh.
+        if has_gpu:
+            return {
+                "tier_id": 2,
+                "tier_name": f"Vulkan/CUDA GPU + CPU Mesh ({gpu_name})",
+                "badge": f"⚡ {gpu_name} + CPU",
+                "color": "#38bdf8",
+                "bg_color": "#0c4a6e",
+                "strategy": "GPU + CPU",
+                "short_tag": "GPU + CPU",
+                "coprocessor_target": det.preferred_coprocessor_target(heavy=is_heavy_workload),
+                "hw_tag": f"*{gpu_name} + CPU*",
+                "npu_vendor": "None",
+                "mode": "gpu_cpu_mesh",
+            }
+
+        # TIER 1: CPU multi-core vector mesh.
+        return {
+            "tier_id": 1,
+            "tier_name": f"CPU Multi-Core Vector Mesh ({det.cpu_threads}T)",
+            "badge": f"⚡ CPU Multi-Core ({det.cpu_threads}T)",
             "color": "#10b981",
             "bg_color": "#064e3b",
             "strategy": "CPU",

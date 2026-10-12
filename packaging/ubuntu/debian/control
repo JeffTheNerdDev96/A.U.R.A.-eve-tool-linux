@@ -1,0 +1,41 @@
+Source: aura-eve-tool
+Section: games
+Priority: optional
+Maintainer: JeffTheNerdDev96 <JeffTheNerdDev96@users.noreply.github.com>
+Homepage: https://github.com/JeffTheNerdDev96/A.U.R.A.-eve-tool-linux
+Standards-Version: 4.6.2
+Build-Depends: debhelper-compat (= 13)
+Rules-Requires-Root: no
+
+Package: aura-eve-tool
+Architecture: all
+Depends: ${misc:Depends},
+ python3 (>= 3.12),
+ python3-pyqt6,
+ python3-psutil,
+ python3-numpy,
+ python3-pil,
+ python3-pypdf,
+ python3-docx,
+ python3-openpyxl,
+ python3-slixmpp,
+ python3-pytesseract,
+ tesseract-ocr,
+ tesseract-ocr-eng,
+ libgl1 | libglx-mesa0,
+ libegl1 | libegl-mesa0,
+ libvulkan1 | libvulkan.so.1,
+ fonts-dejavu-core
+Recommends: mesa-vulkan-drivers, libopus0
+Suggests: python3-venv
+Description: EVE Online tactical AI assistant and intel radar (Angel Cartel theme)
+ A.U.R.A. (Adaptive Underworld Recon Array) is an Angel Cartel themed EVE Online
+ tactical companion featuring a local GGUF language model neural core, a Live
+ Intel Radar, D-Scan and fleet composition analysis, a fitting laboratory,
+ wormhole mapping, and XMPP / Mumble VOIP integration.
+ .
+ The application is installed under /opt/aura. Per-user runtime state (logs and
+ model weights) is stored under ~/.local/share/aura following the FreeDesktop
+ XDG Base Directory specification.
+ .
+ Protected under the GNU Affero General Public License v3.0 (AGPL-3.0).

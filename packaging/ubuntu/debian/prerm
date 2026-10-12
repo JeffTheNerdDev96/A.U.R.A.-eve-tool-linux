@@ -1,0 +1,9 @@
+#!/bin/sh
+# A.U.R.A. pre-removal script (Debian/Ubuntu). GNU Affero GPL v3.0.
+set -e
+
+if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
+    rm -rf /opt/aura/.venv 2>/dev/null || true
+fi
+
+exit 0

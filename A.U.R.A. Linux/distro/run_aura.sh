@@ -16,7 +16,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 # ==============================================================================
-# Native Linux Launcher for Adaptive Underworld Recon Array (A.U.R.A.) - v0.4.2-alpha.1
+# Native Linux Launcher for Adaptive Underworld Recon Array (A.U.R.A.) - v0.6.0-alpha.4
 # ==============================================================================
 
 set -e
@@ -29,7 +29,7 @@ export PYTHONIOENCODING=utf-8
 export PYTHONDONTWRITEBYTECODE=1
 
 echo "==================================================================="
-echo "  [+] Adaptive Underworld Recon Array (A.U.R.A.) - v0.4.2-alpha.1"
+echo "  [+] Adaptive Underworld Recon Array (A.U.R.A.) - v0.6.0-alpha.4"
 echo "  Angel Cartel Cybernetics Division — Native Linux Release"
 echo "==================================================================="
 echo ""
@@ -60,8 +60,20 @@ else
     export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-xcb}"
 fi
 
-# 3. Configure shared libraries
-export LD_LIBRARY_PATH="${APP_ROOT}/requirements/venv/lib/python3.12/site-packages/llama_cpp/lib:${LD_LIBRARY_PATH}"
+# 3. Configure shared libraries (llama.cpp / llama_cpp native extension)
+LLAMA_LIB_DIR=""
+for VENV_CAND in "${APP_ROOT}/.venv" "${APP_ROOT}/requirements/venv" "${APP_ROOT}/venv"; do
+    if [ -d "${VENV_CAND}/lib" ]; then
+        FOUND_LIB="$(find "${VENV_CAND}/lib" -type d -path '*llama_cpp*' -name lib -print -quit 2>/dev/null || true)"
+        if [ -n "${FOUND_LIB}" ]; then
+            LLAMA_LIB_DIR="${FOUND_LIB}"
+            break
+        fi
+    fi
+done
+if [ -n "${LLAMA_LIB_DIR}" ]; then
+    export LD_LIBRARY_PATH="${LLAMA_LIB_DIR}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+fi
 
 echo "[+] Launching A.U.R.A. Native Interface..."
 exec "${PYTHON_BIN}" "${APP_ROOT}/app.py" "$@"

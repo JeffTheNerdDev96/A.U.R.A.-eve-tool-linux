@@ -33,10 +33,13 @@ import ssl
 import threading
 import time
 import xml.etree.ElementTree as ET
-from typing import Callable, Any
+from dataclasses import replace
+from typing import Callable
 
-from core.error_handler import AURAErrorCode, log_diagnostic_error
+from version import VERSION
+from core.error_handler import AURAErrorCode, log_diagnostic_error, log_soft_failure
 from core.eve_data import lookup_ship
+from core.lifecycle import XMPP_JOIN_MS
 from .models import (
     XMPPAccountConfig,
     XMPPConnectionState,
@@ -50,19 +53,30 @@ from .models import (
 
 # Common regex patterns for New Eden alliance broadcast pings
 _RE_BROADCAST_HEADER = re.compile(
-    r"(?:\*\*\*+\s*(?:ALLIANCE|COALITION|CORP|FLEET)\s*(?:BROADCAST|PING)\s*\*\*\*+|^\s*(?:ALLIANCE|CORP|FLEET)\s*PING:)",
+    r"(?:\*\*\*+\s*(?:ALLIANCE|COALITION|CORP|FLEET)\s*(?:BROADCAST|PING)\s*\*\*\*+|^\s*(?:ALLIANCE|CORP|FLEET)\s*PING:|~~~+\s*(?:This was a\s*)?(?:coord\s*)?broadcast\b)",
     re.IGNORECASE,
 )
 _RE_CTA = re.compile(r"\b(?:CTA|CALL\s*TO\s*ARMS|MAX\s*NUMBERS|RED\s*ALERT)\b", re.IGNORECASE)
-_RE_STRATOP = re.compile(r"\b(?:STRATOP|STRATEGIC\s*OP|OBJECTIVE|TIMER|NODE\s*WAR)\b", re.IGNORECASE)
+_RE_STRATOP = re.compile(r"\b(?:STRATOP|STRATEGIC(?:\s*OP)?|OBJECTIVE|TIMER|NODE\s*WAR)\b", re.IGNORECASE)
 _RE_STAND_DOWN = re.compile(r"\b(?:STAND\s*DOWN|STANDDOWN|CANCELLED|DISPERSE|OP\s*OVER)\b", re.IGNORECASE)
-_RE_FORMUP = re.compile(r"\b(?:FORMUP|FORMING|FORM\s*UP|NOW\s*FORMING|IN\s*FLEET)\b", re.IGNORECASE)
+_RE_FORMUP = re.compile(r"\b(?:FORMUP|FORMING|FORM\s*UP|NOW\s*FORMING|IN\s*FLEET|FORUMUP)\b", re.IGNORECASE)
 
-_RE_FC = re.compile(r"(?:FC|FLEET\s*COMMANDER|COMMANDER)\s*:\s*([A-Za-z0-9 '\-_]+)", re.IGNORECASE)
+_RE_FC = re.compile(r"(?:FC(?:\s*NAME)?|FLEET\s*COMMANDER(?:\s*NAME)?|COMMANDER)\s*[:\-/]\s*([^\n\r]+)", re.IGNORECASE)
 _RE_DOCTRINE = re.compile(r"(?:DOCTRINE|SHIPS?|COMP|BRING)\s*:\s*([^\n\r,]+)", re.IGNORECASE)
-_RE_LOCATION = re.compile(r"(?:LOCATION|SYSTEM|STAGING|DESTINATION|DEST|MOVE\s*TO)\s*:\s*([A-Za-z0-9\-]+)", re.IGNORECASE)
-_RE_PAP = re.compile(r"(?:PAP|FATIGUE|LINK)\s*:\s*(https?://[^\s]+)", re.IGNORECASE)
+_RE_LOCATION = re.compile(
+    r"(?:FORMUP(?:\s*LOCATION)?|FORUMUP(?:\s*LOCATION)?|LOC(?:ATION)?|STAGING(?:\s*SYSTEM)?|STAGE|DEST(?:INATION)?|TARGET(?:\s*SYSTEM)?|SYSTEM|MOVE\s*TO)\s*[:\-/]\s*([A-Za-z0-9\- ]+)",
+    re.IGNORECASE,
+)
+_RE_PAP = re.compile(r"(?:PAP(?:\s*TYPE)?|FATIGUE|LINK)\s*:\s*(https?://[^\s]+|[A-Za-z0-9\- ]+)", re.IGNORECASE)
 _RE_MUMBLE = re.compile(r"(?:COMMS?|MUMBLE|TS3?|VOICE)\s*:\s*([^\n\r]+)", re.IGNORECASE)
+
+# Bound stream parsing so a hostile or broken server cannot grow RAM / pin CPU.
+_WORKER_JOIN_SEC = XMPP_JOIN_MS / 1000.0
+_MAX_RECV_BUFFER = 1 * 1024 * 1024
+_MAX_HANDSHAKE_BUFFER = 256 * 1024
+_MAX_STANZA_CHARS = 256 * 1024
+_MAX_OUTBOUND_QUEUE = 256
+_STANZA_OPEN_RE = re.compile(r"<(message|presence|iq)\b", re.IGNORECASE)
 
 
 def escape_xml(text: str) -> str:
@@ -112,12 +126,19 @@ def parse_broadcast_ping(raw_body: str) -> XMPPBroadcastPing | None:
     fc_name = ""
     fc_m = _RE_FC.search(raw_body)
     if fc_m:
-        fc_name = fc_m.group(1).strip()
+        raw_fc = fc_m.group(1).strip()
+        # Clean FC name (strip comments, brackets, or delimiters)
+        raw_fc = re.split(r"[|\(\[\n\r]", raw_fc)[0].strip()
+        if raw_fc and raw_fc.lower() not in ("unknown", "n/a", "none"):
+            fc_name = raw_fc
 
-    target_system = ""
+    staging_system = ""
     loc_m = _RE_LOCATION.search(raw_body)
     if loc_m:
-        target_system = loc_m.group(1).strip().upper()
+        raw_loc = loc_m.group(1).strip()
+        tokens = raw_loc.split()
+        if tokens:
+            staging_system = tokens[0].strip("(),.").upper()
 
     doctrine_ships: list[str] = []
     doc_m = _RE_DOCTRINE.search(raw_body)
@@ -147,7 +168,7 @@ def parse_broadcast_ping(raw_body: str) -> XMPPBroadcastPing | None:
         mumble_channel = mum_m.group(1).strip()
 
     return XMPPBroadcastPing(
-        target_system=target_system,
+        staging_system=staging_system,
         doctrine_ships=doctrine_ships,
         fc_name=fc_name,
         formup_timer="",
@@ -155,6 +176,7 @@ def parse_broadcast_ping(raw_body: str) -> XMPPBroadcastPing | None:
         mumble_channel=mumble_channel,
         priority=priority,
         raw_body=raw_body.strip(),
+        target_system=staging_system,
     )
 
 
@@ -186,8 +208,9 @@ class XMPPProtocolAdapter:
         self.state: XMPPConnectionState = XMPPConnectionState.DISCONNECTED
         self._worker_thread: threading.Thread | None = None
         self._is_running = False
+        self._stop_event = threading.Event()
         self._socket: socket.socket | ssl.SSLSocket | None = None
-        self._outbound_queue: queue.Queue[str] = queue.Queue()
+        self._outbound_queue: queue.Queue[str] = queue.Queue(maxsize=_MAX_OUTBOUND_QUEUE)
         self._joined_rooms: set[str] = set()
         self._bound_jid: str = ""
         self._roster: dict[str, XMPPRosterContact] = {}
@@ -206,14 +229,16 @@ class XMPPProtocolAdapter:
         Initiates asynchronous connection using the provided in-memory config.
         Credentials are never saved to disk.
         """
-        if self.state in (XMPPConnectionState.CONNECTING, XMPPConnectionState.AUTHENTICATING, XMPPConnectionState.CONNECTED):
+        # Join any previous worker before starting a new one (shared socket / password races).
+        if self._worker_thread is not None and self._worker_thread.is_alive():
             self.disconnect()
 
-        self.config = config
+        self.config = replace(config)
         if not config.jid or not config.domain:
             self.set_state(XMPPConnectionState.ERROR, "Invalid JID format (expected user@domain)")
             return False
 
+        self._stop_event.clear()
         self._is_running = True
         self._joined_rooms.clear()
         self._roster.clear()
@@ -227,22 +252,49 @@ class XMPPProtocolAdapter:
         self._worker_thread.start()
         return True
 
-    def disconnect(self) -> None:
-        """Terminates active network connection and purges in-memory buffers."""
-        self._is_running = False
-        self.set_state(XMPPConnectionState.DISCONNECTING)
+    def _wipe_credentials(self) -> None:
+        """Zero the in-memory password and drop the config reference held by the adapter."""
+        cfg = self.config
+        if cfg is not None:
+            cfg.password = ""
+        self.config = None
 
-        # Send closing stream tag if connected
-        if self._socket:
-            try:
-                self._socket.sendall(b"</stream:stream>")
-            except Exception:
-                pass
-            try:
-                self._socket.close()
-            except Exception:
-                pass
-            self._socket = None
+    def _close_socket(self) -> None:
+        sock = self._socket
+        self._socket = None
+        if sock is None:
+            return
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    def disconnect(self) -> None:
+        """Stop the worker thread, close the socket, and purge in-memory credentials."""
+        self._is_running = False
+        self._stop_event.set()
+        if self.state != XMPPConnectionState.DISCONNECTED:
+            self.set_state(XMPPConnectionState.DISCONNECTING)
+
+        # Ask the worker to emit </stream:stream>. Never sendall() from the GUI thread
+        # (it can block on a 10s handshake timeout while recv() holds the same socket).
+        try:
+            self._outbound_queue.put_nowait("</stream:stream>")
+        except queue.Full:
+            pass
+
+        worker = self._worker_thread
+        on_worker = worker is not None and threading.current_thread() is worker
+        if worker is not None and worker.is_alive() and not on_worker:
+            worker.join(timeout=_WORKER_JOIN_SEC)
+
+        # Unblock a stuck recv() if the worker did not exit on its own.
+        self._close_socket()
+        if worker is not None and worker.is_alive() and not on_worker:
+            worker.join(timeout=1.0)
+
+        if not on_worker:
+            self._worker_thread = None
 
         while not self._outbound_queue.empty():
             try:
@@ -253,7 +305,19 @@ class XMPPProtocolAdapter:
         self._joined_rooms.clear()
         self._bound_jid = ""
         self._roster.clear()
+        self._wipe_credentials()
         self.set_state(XMPPConnectionState.DISCONNECTED)
+
+    def _enqueue_outbound(self, stanza: str) -> bool:
+        try:
+            self._outbound_queue.put_nowait(stanza)
+            return True
+        except queue.Full:
+            log_soft_failure(
+                "XMPPProtocolAdapter._enqueue_outbound",
+                RuntimeError("outbound queue full"),
+            )
+            return False
 
     def send_message(self, target_jid: str, body: str, is_groupchat: bool = True) -> bool:
         """Sends an outgoing direct or MUC room message over active XMPP stream."""
@@ -283,7 +347,8 @@ class XMPPProtocolAdapter:
             f"<body>{escape_xml(body)}</body>"
             f"</message>"
         )
-        self._outbound_queue.put(stanza)
+        if not self._enqueue_outbound(stanza):
+            return False
 
         if self.on_message_received:
             self.on_message_received(out_msg)
@@ -303,7 +368,7 @@ class XMPPProtocolAdapter:
                 f"<x xmlns='http://jabber.org/protocol/muc'/>"
                 f"</presence>"
             )
-            self._outbound_queue.put(stanza)
+            self._enqueue_outbound(stanza)
 
         if self.on_room_joined:
             self.on_room_joined(room_jid, nick, "Alliance Tactical Room")
@@ -316,19 +381,19 @@ class XMPPProtocolAdapter:
             if self.state == XMPPConnectionState.CONNECTED and self._is_running and self.config:
                 nick = self.config.nickname or self.config.username
                 stanza = f"<presence to='{escape_xml(room_jid)}/{escape_xml(nick)}' type='unavailable'/>"
-                self._outbound_queue.put(stanza)
+                self._enqueue_outbound(stanza)
             return True
         return False
 
     def request_roster(self) -> None:
         """Requests user roster from server (RFC 6121 §2)."""
         if self.state == XMPPConnectionState.CONNECTED and self._is_running:
-            self._outbound_queue.put("<iq type='get' id='roster_init'><query xmlns='jabber:iq:roster'/></iq>")
+            self._enqueue_outbound("<iq type='get' id='roster_init'><query xmlns='jabber:iq:roster'/></iq>")
 
     def request_bookmarks(self) -> None:
         """Requests user bookmarked conference rooms (XEP-0048 Private XML Storage)."""
         if self.state == XMPPConnectionState.CONNECTED and self._is_running:
-            self._outbound_queue.put(
+            self._enqueue_outbound(
                 "<iq type='get' id='bm_init'><query xmlns='jabber:iq:private'><storage xmlns='storage:bookmarks'/></query></iq>"
             )
 
@@ -336,7 +401,7 @@ class XMPPProtocolAdapter:
         """Queries MUC conference host for public room directory (XEP-0030 disco#items)."""
         if self.state == XMPPConnectionState.CONNECTED and self._is_running and self.config:
             host = conference_host or f"conference.{self.config.domain}"
-            self._outbound_queue.put(
+            self._enqueue_outbound(
                 f"<iq to='{escape_xml(host)}' type='get' id='disco_muc'><query xmlns='http://jabber.org/protocol/disco#items'/></iq>"
             )
 
@@ -359,6 +424,7 @@ class XMPPProtocolAdapter:
             "ECDHE+AESGCM:ECDHE+CHACHA20:DHE+AESGCM:DHE+CHACHA20:!aNULL:!eNULL:!MD5:!3DES:!RC4:!DES:!DSS:!SEED:!IDEA"
         )
         if allow_self_signed:
+            # Opt-in only: SASL PLAIN then ships the password to whoever completed TLS.
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
         else:
@@ -377,12 +443,16 @@ class XMPPProtocolAdapter:
                 if not chunk:
                     raise ConnectionResetError("Server closed connection during handshake")
                 buffer += chunk.decode("utf-8", errors="replace")
+                if len(buffer) > _MAX_HANDSHAKE_BUFFER:
+                    raise ConnectionError("XMPP handshake buffer exceeded cap")
                 for pat in target_patterns:
                     if pat in buffer:
                         return buffer
             except socket.timeout:
                 break
-        return buffer
+        raise ConnectionError(
+            f"XMPP handshake timed out waiting for {target_patterns}: {buffer[:200].strip()}"
+        )
 
     def _connection_worker(self) -> None:
         """
@@ -401,6 +471,7 @@ class XMPPProtocolAdapter:
             try:
                 # 1. Establish TCP socket connection
                 raw_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                self._socket = raw_sock
                 raw_sock.settimeout(10.0)
                 raw_sock.connect((host, port))
 
@@ -411,8 +482,7 @@ class XMPPProtocolAdapter:
                     ctx = self._build_ssl_context(cfg.allow_self_signed_tls)
                     server_host = cfg.domain.strip() if cfg.domain else None
                     sock = ctx.wrap_socket(raw_sock, server_hostname=server_host)
-
-                self._socket = sock
+                    self._socket = sock
 
                 # 3. Stream header exchange
                 stream_header = (
@@ -478,8 +548,8 @@ class XMPPProtocolAdapter:
                 session_stanza = "<iq type='set' id='sess_1'><session xmlns='urn:ietf:params:xml:ns:xmpp-session'/></iq>"
                 try:
                     sock.sendall(session_stanza.encode("utf-8"))
-                except Exception:
-                    pass
+                except OSError as exc:
+                    log_soft_failure("XMPPProtocolAdapter.session_stanza", exc)
 
                 # 9. Send Initial Presence & Status
                 presence_stanza = (
@@ -529,16 +599,11 @@ class XMPPProtocolAdapter:
 
                     # 11b. Send proactive keepalive ping every 12 seconds
                     if time.time() - last_keepalive > 12.0:
-                        try:
-                            # Send whitespace heartbeat
-                            sock.sendall(b" ")
-                            # Send XEP-0199 Ping to domain
-                            ping_id = f"aura_ping_{int(time.time())}"
-                            ping_stanza = f"<iq type='get' to='{escape_xml(cfg.domain)}' id='{ping_id}'><ping xmlns='urn:xmpp:ping'/></iq>"
-                            sock.sendall(ping_stanza.encode("utf-8"))
-                            last_keepalive = time.time()
-                        except Exception:
-                            pass
+                        sock.sendall(b" ")
+                        ping_id = f"aura_ping_{int(time.time())}"
+                        ping_stanza = f"<iq type='get' to='{escape_xml(cfg.domain)}' id='{ping_id}'><ping xmlns='urn:xmpp:ping'/></iq>"
+                        sock.sendall(ping_stanza.encode("utf-8"))
+                        last_keepalive = time.time()
 
                     # 11c. Read incoming stream data
                     try:
@@ -546,6 +611,8 @@ class XMPPProtocolAdapter:
                         if not chunk:
                             raise ConnectionResetError("Remote server closed stream.")
                         recv_buffer += chunk.decode("utf-8", errors="replace")
+                        if len(recv_buffer) > _MAX_RECV_BUFFER:
+                            raise ConnectionError("XMPP recv buffer exceeded 1 MiB; dropping stream")
                     except socket.timeout:
                         continue
                     except ssl.SSLError as s_err:
@@ -568,7 +635,7 @@ class XMPPProtocolAdapter:
                 log_diagnostic_error(AURAErrorCode.ERR_7003_XMPP_HOST_UNREACHABLE, net_err, "XMPPProtocolAdapter._connection_worker")
                 if self._is_running and cfg.auto_reconnect:
                     self.set_state(XMPPConnectionState.CONNECTING, f"Connection dropped. Reconnecting in {int(reconnect_backoff)}s...")
-                    time.sleep(reconnect_backoff)
+                    self._stop_event.wait(timeout=reconnect_backoff)
                     reconnect_backoff = min(reconnect_backoff * 2.0, 15.0)
                     continue
                 else:
@@ -577,7 +644,7 @@ class XMPPProtocolAdapter:
             except Exception as exc:
                 log_diagnostic_error(AURAErrorCode.ERR_7001_XMPP_AUTH_FAILED, exc, "XMPPProtocolAdapter._connection_worker")
                 if self._is_running and cfg.auto_reconnect:
-                    time.sleep(reconnect_backoff)
+                    self._stop_event.wait(timeout=reconnect_backoff)
                     reconnect_backoff = min(reconnect_backoff * 2.0, 15.0)
                     continue
                 else:
@@ -587,7 +654,7 @@ class XMPPProtocolAdapter:
                 if self._socket:
                     try:
                         self._socket.close()
-                    except Exception:
+                    except OSError:
                         pass
                     self._socket = None
 
@@ -596,21 +663,39 @@ class XMPPProtocolAdapter:
 
     def _process_incoming_stanzas(self, buffer: str, sock: socket.socket | ssl.SSLSocket) -> str:
         """
-        Extracts and dispatches complete XML stanzas (<message>, <presence>, <iq>) from the stream buffer.
-        Returns the remaining unparsed buffer tail.
+        Extract complete <message>/<presence>/<iq> stanzas without a greedy DOTALL regex.
+        Incomplete stanzas larger than _MAX_STANZA_CHARS fail closed (drop the stream).
         """
-        pattern = re.compile(r"<(message|presence|iq)\b[^>]*>(?:.*?</\1>|(?<=/>))", re.DOTALL | re.IGNORECASE)
-
-        while True:
-            match = pattern.search(buffer)
+        while buffer:
+            match = _STANZA_OPEN_RE.search(buffer)
             if not match:
-                single_tag = re.search(r"<(message|presence|iq)\b[^>]*/>", buffer, re.DOTALL | re.IGNORECASE)
-                if not single_tag:
-                    break
-                match = single_tag
+                return buffer[-64:] if len(buffer) > 64 else buffer
 
-            stanza_text = match.group(0)
-            buffer = buffer[match.end():]
+            if match.start() > 0:
+                buffer = buffer[match.start():]
+
+            gt = buffer.find(">")
+            if gt == -1:
+                if len(buffer) > _MAX_STANZA_CHARS:
+                    raise ConnectionError("Incomplete XMPP stanza exceeded size cap")
+                return buffer
+
+            first_tag = buffer[: gt + 1]
+            tag_name = match.group(1)
+            stripped = first_tag.rstrip()
+            if stripped.endswith("/>") or first_tag.endswith("/>"):
+                stanza_text = first_tag
+                buffer = buffer[gt + 1 :]
+            else:
+                close_tag = f"</{tag_name}>"
+                close_idx = buffer.lower().find(close_tag.lower(), gt + 1)
+                if close_idx == -1:
+                    if len(buffer) > _MAX_STANZA_CHARS:
+                        raise ConnectionError("Incomplete XMPP stanza exceeded size cap")
+                    return buffer
+                end = close_idx + len(close_tag)
+                stanza_text = buffer[:end]
+                buffer = buffer[end:]
 
             try:
                 self._dispatch_stanza(stanza_text, sock)
@@ -623,7 +708,8 @@ class XMPPProtocolAdapter:
         """Parses a single validated XML stanza and fires relevant callbacks."""
         try:
             elem = ET.fromstring(stanza_text)
-        except Exception:
+        except ET.ParseError as exc:
+            log_soft_failure("XMPPProtocolAdapter._dispatch_stanza.parse", exc)
             return
 
         tag_name = elem.tag.split("}")[-1].lower() if "}" in elem.tag else elem.tag.lower()
@@ -704,20 +790,20 @@ class XMPPProtocolAdapter:
                     pong = f"<iq{to_attr} id='{escape_xml(iq_id)}' type='result'/>"
                     try:
                         sock.sendall(pong.encode("utf-8"))
-                    except Exception:
-                        pass
+                    except OSError as exc:
+                        log_soft_failure("XMPPProtocolAdapter.iq_pong", exc)
                 elif has_version:
                     # Respond with Software Version
                     v_resp = (
                         f"<iq{to_attr} id='{escape_xml(iq_id)}' type='result'>"
                         f"<query xmlns='jabber:iq:version'>"
-                        f"<name>A.U.R.A.</name><version>v0.4.2-alpha.1</version><os>Windows</os>"
+                        f"<name>A.U.R.A.</name><version>{VERSION}</version><os>Windows</os>"
                         f"</query></iq>"
                     )
                     try:
                         sock.sendall(v_resp.encode("utf-8"))
-                    except Exception:
-                        pass
+                    except OSError as exc:
+                        log_soft_failure("XMPPProtocolAdapter.iq_version", exc)
                 elif has_disco_info:
                     # Respond with Disco info
                     disco_resp = (
@@ -732,8 +818,8 @@ class XMPPProtocolAdapter:
                     )
                     try:
                         sock.sendall(disco_resp.encode("utf-8"))
-                    except Exception:
-                        pass
+                    except OSError as exc:
+                        log_soft_failure("XMPPProtocolAdapter.iq_disco", exc)
                 elif iq_id:
                     # RFC 6120 §8.2.3: Return feature-not-implemented for unhandled get queries
                     err_resp = (
@@ -743,8 +829,8 @@ class XMPPProtocolAdapter:
                     )
                     try:
                         sock.sendall(err_resp.encode("utf-8"))
-                    except Exception:
-                        pass
+                    except OSError as exc:
+                        log_soft_failure("XMPPProtocolAdapter.iq_feature_error", exc)
 
             # B. Inbound IQ "set" requests (e.g. Roster pushes)
             elif iq_type == "set":
@@ -767,8 +853,8 @@ class XMPPProtocolAdapter:
                 ack = f"<iq{to_attr} id='{escape_xml(iq_id)}' type='result'/>"
                 try:
                     sock.sendall(ack.encode("utf-8"))
-                except Exception:
-                    pass
+                except OSError as exc:
+                    log_soft_failure("XMPPProtocolAdapter.iq_set_ack", exc)
 
             # C. Inbound IQ "result" responses
             elif iq_type == "result":
@@ -838,15 +924,32 @@ class XMPPProtocolAdapter:
 
             if "/" in from_jid:
                 room_or_user, resource_or_nick = from_jid.split("/", 1)
-                # If this is a MUC room join
+                # Check if this presence is from a joined MUC room
                 if room_or_user in self._joined_rooms and pres_type != "error":
-                    if self.on_room_joined:
-                        self.on_room_joined(room_or_user, resource_or_nick, status_val or "Alliance Channel")
-                # If this is a contact presence update
-                bare_user = room_or_user
-                if bare_user in self._roster:
-                    self._roster[bare_user].presence_show = "offline" if pres_type == "unavailable" else show_val
-                    self._roster[bare_user].presence_status = status_val
-                    if self.on_roster_updated:
-                        self.on_roster_updated(list(self._roster.values()))
+                    # XEP-0045: Check if presence corresponds to self-presence (status code 110 or own nick)
+                    is_self_presence = False
+                    for code_elem in elem.findall(".//{*}status"):
+                        if code_elem.attrib.get("code") == "110":
+                            is_self_presence = True
+                            break
+
+                    my_nick = (self.config.nickname or self.config.username) if self.config else ""
+                    if not is_self_presence and my_nick and resource_or_nick.lower() == my_nick.lower():
+                        is_self_presence = True
+
+                    if is_self_presence:
+                        if pres_type != "unavailable" and self.on_room_joined:
+                            self.on_room_joined(room_or_user, resource_or_nick, status_val or "Alliance Channel")
+                    else:
+                        # Occupant presence update from other pilots in the channel:
+                        # Silently ignore to avoid triggering join loop & tree refreshes for hundreds of pilots
+                        pass
+                else:
+                    # Contact presence update for 1:1 pilots / roster
+                    bare_user = room_or_user
+                    if bare_user in self._roster:
+                        self._roster[bare_user].presence_show = "offline" if pres_type == "unavailable" else show_val
+                        self._roster[bare_user].presence_status = status_val
+                        if self.on_roster_updated:
+                            self.on_roster_updated(list(self._roster.values()))
 

@@ -16,7 +16,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 # ==============================================================================
-# Native Ubuntu Setup & Dependency Installer for A.U.R.A. - v0.4.2-alpha.1
+# Native Ubuntu Setup & Dependency Installer for A.U.R.A. - v0.6.0-alpha.4
 # ==============================================================================
 
 set -e

@@ -21,10 +21,23 @@ A.U.R.A. Bootstrap Package.
 Handles low-level Python runtime, Qt plugin path discovery, and C++ library DLL loading.
 """
 
-from .bootstrap_runtime import configure_qt_paths, configure_frozen_qt_paths
-from .bootstrap_llama import configure_llama_dll_paths, probe_llama_backend
+from .bootstrap_runtime import (
+    configure_qt_paths,
+    configure_frozen_qt_paths,
+    configure_qt_plugin_paths,
+    configure_linux_display_server,
+    bootstrap_qt_runtime,
+)
+from .bootstrap_llama import (
+    configure_llama_dll_paths,
+    bootstrap_llama_runtime,
+    check_vulkan_driver_available,
+    check_cuda_driver_available,
+)
 
 __all__ = [
     "configure_qt_paths", "configure_frozen_qt_paths",
-    "configure_llama_dll_paths", "probe_llama_backend"
+    "configure_qt_plugin_paths", "configure_linux_display_server", "bootstrap_qt_runtime",
+    "configure_llama_dll_paths", "bootstrap_llama_runtime",
+    "check_vulkan_driver_available", "check_cuda_driver_available",
 ]

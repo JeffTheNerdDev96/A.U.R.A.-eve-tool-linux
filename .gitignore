@@ -1,0 +1,94 @@
+# ==============================================================================
+# Git Ignore Configuration for Adaptive Underworld Recon Array (A.U.R.A.) Linux
+# GNU Affero General Public License v3.0 (AGPL-3.0)
+# ==============================================================================
+
+# 1. Neural Model Weights & Large AI Artifacts (Local Execution Only)
+*.gguf
+*.bin
+*.onnx
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+models/*
+!models/.gitkeep
+**/models/*
+!**/models/.gitkeep
+training/
+**/training/
+
+# 2. Virtual Environments
+.venv/
+**/.venv/
+venv/
+**/venv/
+requirements/venv/
+**/requirements/venv/
+env/
+ENV/
+
+# 3. Python Cache, Bytecode & Analysis Artifacts
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 4. Build Artifacts, Distros & Packages
+build/
+dist/
+packaging/**/build/
+packaging/**/rpmbuild/
+*.spec
+!packaging/fedora/*.spec
+*.deb
+*.rpm
+*.tar.gz
+*.7z
+*.zip
+
+# 5. Compiled Objects & Libraries
+*.so
+*.dylib
+*.dll
+*.whl
+
+# 6. Local Runtime Hardware Telemetry & State
+hardware_profile.json
+**/hardware_profile.json
+requirements/hardware_profile.json
+
+# 7. Logs, Diagnostics & Crash Dumps
+logs/*
+!logs/.gitkeep
+**/logs/*
+!**/logs/.gitkeep
+*.log
+*.tmp
+*.temp
+*.dmp
+*.bak
+
+# 8. OS & IDE Metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+.cursor/
+*.swp
+*.swo
+*~
+
+# 9. Local Planning & Release Artifacts (Private Reference Only)
+roadmap/
+**/roadmap/
+RELEASE_NOTES.md
+RELEASE_NOTES.*
+standalone_build/
+**/standalone_build/

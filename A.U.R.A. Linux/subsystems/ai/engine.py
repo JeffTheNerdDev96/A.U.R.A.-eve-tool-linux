@@ -86,8 +86,27 @@ def _init_cuda_runtime():
     _CUDA_INITIALIZED = True
 
 
+def _llama_shared_lib_names() -> tuple:
+    """Returns candidate llama.cpp shared-library filenames for the host operating system."""
+    if sys.platform == "win32":
+        return ("llama.dll",)
+    if sys.platform == "darwin":
+        return ("libllama.dylib",)
+    return ("libllama.so", "libllama.so.0")
+
+
+def _prepend_library_path(directory: str) -> None:
+    """Prepends a directory to LD_LIBRARY_PATH on POSIX hosts (no-op on Windows)."""
+    if sys.platform == "win32" or not directory or not os.path.isdir(directory):
+        return
+    current = os.environ.get("LD_LIBRARY_PATH", "")
+    parts = current.split(os.pathsep) if current else []
+    if directory not in parts:
+        os.environ["LD_LIBRARY_PATH"] = f"{directory}{os.pathsep}{current}" if current else directory
+
+
 def _init_vulkan_runtime():
-    """Initializes Vulkan backend libraries for direct GPU acceleration on Intel Arc/Iris, AMD, and NVIDIA."""
+    """Initializes llama.cpp GPU backend libraries (Vulkan/CUDA) for the host platform."""
     global _VULKAN_INITIALIZED
     if _VULKAN_INITIALIZED:
         return
@@ -103,26 +122,30 @@ def _init_vulkan_runtime():
 
     candidates = []
     if meipass:
-        candidates.append(os.path.join(meipass, "llama_cpp", "lib", "llama.dll"))
-        candidates.append(os.path.join(meipass, "requirements", "vulkan_llama", "llama.dll"))
+        candidates.append(os.path.join(meipass, "llama_cpp", "lib"))
+        candidates.append(os.path.join(meipass, "vulkan_llama"))
+        candidates.append(os.path.join(exe_dir, "llama_cpp", "lib"))
     candidates.extend([
-        os.path.join(exe_dir, "llama_cpp", "lib", "llama.dll"),
-        os.path.join(exe_dir, "requirements", "vulkan_llama", "llama.dll"),
-        os.path.join(source_dir, "requirements", "vulkan_llama", "llama.dll"),
-        os.path.join(root_dir, "requirements", "vulkan_llama", "llama.dll"),
-        os.path.join(source_dir, "vulkan_llama", "llama.dll"),
+        os.path.join(exe_dir, "llama_cpp", "lib"),
+        os.path.join(exe_dir, "vulkan_llama"),
+        os.path.join(source_dir, "requirements", "vulkan_llama"),
+        os.path.join(root_dir, "requirements", "vulkan_llama"),
+        os.path.join(source_dir, "vulkan_llama"),
     ])
-    for p in candidates:
-        if p and os.path.exists(p):
-            v_dir = os.path.dirname(p)
-            os.environ["LLAMA_CPP_LIB"] = p
-            if hasattr(os, "add_dll_directory") and sys.platform == "win32":
-                try:
-                    os.add_dll_directory(v_dir)
-                except Exception:
-                    pass
-            _VULKAN_INITIALIZED = True
-            break
+    for v_dir in candidates:
+        if not v_dir or not os.path.isdir(v_dir):
+            continue
+        for lib_name in _llama_shared_lib_names():
+            if os.path.isfile(os.path.join(v_dir, lib_name)):
+                _prepend_library_path(v_dir)
+                os.environ["LLAMA_CPP_LIB"] = os.path.join(v_dir, lib_name)
+                if sys.platform == "win32" and hasattr(os, "add_dll_directory"):
+                    try:
+                        os.add_dll_directory(v_dir)
+                    except Exception:
+                        pass
+                _VULKAN_INITIALIZED = True
+                return
 
 
 MODEL_LOAD_TIMEOUT_SEC = 60
@@ -521,9 +544,13 @@ class UnifiedInferenceEngine:
         _init_vulkan_runtime()
         if getattr(sys, 'frozen', False):
             base_dir = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
-            lib_path = os.path.join(base_dir, "llama_cpp", "lib", "llama.dll")
-            if os.path.exists(lib_path):
-                os.environ["LLAMA_CPP_LIB"] = lib_path
+            lib_dir = os.path.join(base_dir, "llama_cpp", "lib")
+            _prepend_library_path(lib_dir)
+            for lib_name in _llama_shared_lib_names():
+                lib_path = os.path.join(lib_dir, lib_name)
+                if os.path.exists(lib_path):
+                    os.environ["LLAMA_CPP_LIB"] = lib_path
+                    break
 
         model_file = find_model_file()
 

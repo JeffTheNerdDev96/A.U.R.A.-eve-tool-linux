@@ -34,13 +34,14 @@ from core.events import (
     XMPPBroadcastAlertEvent,
     XMPPRoomJoinedEvent,
     XMPPRosterUpdatedEvent,
+    XMPPChannelDiscoveredEvent,
+    XMPPDirectoryDiscoveredEvent,
 )
 from .models import (
     XMPPAccountConfig,
     XMPPConnectionState,
     XMPPMessage,
     XMPPMessageType,
-    XMPPBroadcastPing,
     XMPPBroadcastPriority,
     XMPPMUCChannel,
     XMPPRosterContact,
@@ -56,6 +57,7 @@ class XMPPChatSubsystem(BaseSubsystem):
     """
 
     MAX_HISTORY_MESSAGES = 1000
+    MAX_DIRECTORY_ROOMS = 500
 
     def __init__(self):
         super().__init__(name="XMPPChatSubsystem")
@@ -72,38 +74,6 @@ class XMPPChatSubsystem(BaseSubsystem):
         self.channels: dict[str, XMPPMUCChannel] = {}
         self.directory_rooms: dict[str, XMPPMUCChannel] = {}
         self.roster: dict[str, XMPPRosterContact] = {}
-
-        # Multicast UI listener callbacks (preserves service layer handling)
-        self._message_listeners: list[Callable[[XMPPMessage], None]] = []
-        self._state_listeners: list[Callable[[XMPPConnectionState, str], None]] = []
-        self._room_joined_listeners: list[Callable[[str, str, str], None]] = []
-        self._roster_listeners: list[Callable[[list[XMPPRosterContact]], None]] = []
-        self._channel_discovered_listeners: list[Callable[[XMPPMUCChannel], None]] = []
-        self._directory_discovered_listeners: list[Callable[[list[XMPPMUCChannel]], None]] = []
-
-    def add_message_listener(self, listener: Callable[[XMPPMessage], None]) -> None:
-        if listener not in self._message_listeners:
-            self._message_listeners.append(listener)
-
-    def add_state_listener(self, listener: Callable[[XMPPConnectionState, str], None]) -> None:
-        if listener not in self._state_listeners:
-            self._state_listeners.append(listener)
-
-    def add_room_joined_listener(self, listener: Callable[[str, str, str], None]) -> None:
-        if listener not in self._room_joined_listeners:
-            self._room_joined_listeners.append(listener)
-
-    def add_roster_listener(self, listener: Callable[[list[XMPPRosterContact]], None]) -> None:
-        if listener not in self._roster_listeners:
-            self._roster_listeners.append(listener)
-
-    def add_channel_discovered_listener(self, listener: Callable[[XMPPMUCChannel], None]) -> None:
-        if listener not in self._channel_discovered_listeners:
-            self._channel_discovered_listeners.append(listener)
-
-    def add_directory_discovered_listener(self, listener: Callable[[list[XMPPMUCChannel]], None]) -> None:
-        if listener not in self._directory_discovered_listeners:
-            self._directory_discovered_listeners.append(listener)
 
     @override
     def initialize(self) -> bool:
@@ -162,8 +132,9 @@ class XMPPChatSubsystem(BaseSubsystem):
         return self.client.connect(config)
 
     def disconnect(self) -> None:
-        """Terminates active XMPP connection and purges sensitive credentials."""
+        """Stop the socket worker (joined inside the adapter) and zero in-memory credentials."""
         self.client.disconnect()
+        # Adapter also zeros its config; clear the service copy so reconnect cannot reuse it.
         if self.active_config:
             self.active_config.password = ""
         self.active_config = None
@@ -179,7 +150,7 @@ class XMPPChatSubsystem(BaseSubsystem):
                     group="Direct Messages",
                     is_direct_chat=True,
                 )
-                self._notify_roster_listeners()
+                self._publish_roster()
 
         return self.client.send_message(target_jid, body, is_groupchat=is_groupchat)
 
@@ -239,20 +210,22 @@ class XMPPChatSubsystem(BaseSubsystem):
 
     def inject_simulated_ping(
         self,
-        target_system: str = "1DQ1-A",
+        staging_system: str = "1DQ1-A",
         doctrine: str = "Tengu / Cerberus",
         fc: str = "ScoutCommander",
         body: str = "",
+        target_system: str = "",
     ) -> XMPPMessage:
         """
         Helper method to inject a synthetic alliance broadcast ping for testing or UI demonstration.
         """
+        effective_sys = staging_system or target_system or "1DQ1-A"
         raw = body or (
             f"*** ALLIANCE BROADCAST ***\n"
-            f"STRATOP: Hostile Fortizar Timer in {target_system}\n"
-            f"FC: {fc}\n"
+            f"STRATOP: Hostile Fortizar Timer in {effective_sys}\n"
+            f"FC Name: {fc}\n"
+            f"Formup Location: {effective_sys}\n"
             f"DOCTRINE: {doctrine}\n"
-            f"LOCATION: {target_system}\n"
             f"COMMS: Fleet 1 (Mumble)\n"
             f"PAP: https://auth.alliance.net/pap/12345\n"
             f"All pilots in standing form up immediately!"
@@ -291,12 +264,6 @@ class XMPPChatSubsystem(BaseSubsystem):
             )
         )
 
-        for listener in list(self._state_listeners):
-            try:
-                listener(state, error_msg)
-            except Exception:
-                pass
-
     def _handle_client_message(self, message: XMPPMessage) -> None:
         """Appends incoming message to in-memory buffer, registers DMs, and notifies listeners."""
         self.messages.append(message)
@@ -319,7 +286,7 @@ class XMPPChatSubsystem(BaseSubsystem):
                     is_direct_chat=True,
                     unread_count=1,
                 )
-                self._notify_roster_listeners()
+                self._publish_roster()
 
         self.event_bus.publish(
             XMPPMessageReceivedEvent(
@@ -330,6 +297,7 @@ class XMPPChatSubsystem(BaseSubsystem):
                 body=message.body,
                 is_broadcast=message.is_broadcast,
                 priority=message.priority.value,
+                message=message,
             )
         )
 
@@ -348,12 +316,6 @@ class XMPPChatSubsystem(BaseSubsystem):
                     raw_text=message.body,
                 )
             )
-
-        for listener in list(self._message_listeners):
-            try:
-                listener(message)
-            except Exception:
-                pass
 
     def _handle_client_room_joined(self, room_jid: str, nickname: str, subject: str) -> None:
         """Handles MUC room join event."""
@@ -375,51 +337,39 @@ class XMPPChatSubsystem(BaseSubsystem):
             )
         )
 
-        for listener in list(self._room_joined_listeners):
-            try:
-                listener(room_jid, nickname, subject)
-            except Exception:
-                pass
-
     def _handle_client_channel_discovered(self, channel: XMPPMUCChannel) -> None:
         """Handles newly discovered channel (e.g. from bookmarks)."""
         self.channels[channel.room_jid] = channel
-        for listener in list(self._channel_discovered_listeners):
-            try:
-                listener(channel)
-            except Exception:
-                pass
+        self.event_bus.publish(
+            XMPPChannelDiscoveredEvent(
+                room_jid=channel.room_jid,
+                name=channel.name,
+                channel=channel,
+            )
+        )
 
     def _handle_client_directory_discovered(self, rooms: list[XMPPMUCChannel]) -> None:
         """Handles public MUC directory discovery."""
         for r in rooms:
             self.directory_rooms[r.room_jid] = r
-        for listener in list(self._directory_discovered_listeners):
-            try:
-                listener(rooms)
-            except Exception:
-                pass
+        overflow = len(self.directory_rooms) - self.MAX_DIRECTORY_ROOMS
+        if overflow > 0:
+            for key in list(self.directory_rooms.keys())[:overflow]:
+                self.directory_rooms.pop(key, None)
+        self.event_bus.publish(
+            XMPPDirectoryDiscoveredEvent(room_count=len(self.directory_rooms))
+        )
 
     def _handle_client_roster_updated(self, contacts: list[XMPPRosterContact]) -> None:
         """Handles roster updates."""
         for c in contacts:
             self.roster[c.jid] = c
+        self._publish_roster()
 
+    def _publish_roster(self) -> None:
         self.event_bus.publish(
-            XMPPRosterUpdatedEvent(
-                contacts_count=len(self.roster)
-            )
+            XMPPRosterUpdatedEvent(contacts_count=len(self.roster))
         )
-
-        self._notify_roster_listeners()
-
-    def _notify_roster_listeners(self) -> None:
-        contacts_list = list(self.roster.values())
-        for listener in list(self._roster_listeners):
-            try:
-                listener(contacts_list)
-            except Exception:
-                pass
 
     @override
     def get_status(self) -> dict[str, Any]:
